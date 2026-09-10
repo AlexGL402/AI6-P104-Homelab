@@ -147,3 +147,52 @@ Open Terminal остаётся отдельным Docker-контейнером.
 ## Безопасность
 
 Порт `8090` слушает `0.0.0.0`, чтобы dashboard был доступен в LAN. В сервисе нет авторизации. Не пробрасывайте `8090` напрямую в Интернет; для внешнего доступа используйте VPN или reverse proxy с аутентификацией.
+
+
+## Web Terminal в браузере
+
+Для прямого shell-доступа с dashboard используется отдельный `ttyd` на порту `8091`.
+Он работает от обычного пользователя Linux и защищён отдельной HTTP Basic авторизацией.
+
+Установка:
+
+```bash
+cd ~/AI6-P104-Homelab
+git pull
+chmod +x monitor/install-web-terminal.sh
+./monitor/install-web-terminal.sh
+```
+
+Скрипт сам установит `ttyd`, сгенерирует случайный пароль, создаст systemd service
+`ai6-web-terminal` и выведет готовую LAN-ссылку.
+
+После установки в AI6 Host Monitor появится блок **Web Terminal**:
+- **Open Web Terminal** — открыть отдельной вкладкой;
+- **Show / hide below** — встроить терминал прямо внизу страницы мониторинга.
+
+По умолчанию URL имеет вид:
+
+```text
+http://<AI6_LAN_IP>:8091/
+```
+
+Проверить сервис:
+
+```bash
+systemctl status ai6-web-terminal --no-pager
+```
+
+Посмотреть сохранённые учётные данные:
+
+```bash
+sudo cat /etc/ai6-web-terminal.env
+```
+
+Остановить/запустить:
+
+```bash
+sudo systemctl stop ai6-web-terminal
+sudo systemctl start ai6-web-terminal
+```
+
+**Важно:** порт 8091 даёт интерактивный shell на AI6. Не пробрасывайте его напрямую в Интернет.
