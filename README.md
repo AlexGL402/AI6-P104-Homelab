@@ -10,6 +10,7 @@ Ultra-budget local AI homelab built around six NVIDIA P104-100 8 GB GPUs, llama.
 - [External benchmark comparison](benchmarks/external-comparison.md)
 - [Agent tests](benchmarks/agent-tests.md)
 - [Coding-agent system prompt](configs/coding-agent-system-prompt.md)
+- [AI6 Host Monitor](monitor/README_RU.md)
 
 ## Highlights
 
@@ -23,6 +24,7 @@ Ultra-budget local AI homelab built around six NVIDIA P104-100 8 GB GPUs, llama.
 - Two independent 3-GPU Qwen3-Coder 30B workers
 - Open WebUI frontend
 - Open Terminal for real file/command execution
+- AI6 Host Monitor on port 8090
 - Agentic coding tested with FastAPI projects
 
 ## Best measured configuration
@@ -85,12 +87,14 @@ Open Terminal development ports are exposed as:
 - `8000` — Open Terminal API
 - `8001-8010` — development applications
 
-Example LAN URLs:
+The current LAN address must be detected dynamically. Example URLs:
 
 ```text
-http://10.36.1.164:8001
-http://10.36.1.164:8001/docs
+http://<AI6_LAN_IP>:8001
+http://<AI6_LAN_IP>:8001/docs
 ```
+
+Inside Docker, Open WebUI should reach host-side services through `host.docker.internal` rather than a hard-coded LAN address.
 
 ## Architecture
 
@@ -126,6 +130,7 @@ benchmarks/
 configs/
 deploy/
 docs/
+monitor/
 INSTALL_RU.md
 ```
 
