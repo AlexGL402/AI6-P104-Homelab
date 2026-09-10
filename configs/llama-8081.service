@@ -1,0 +1,23 @@
+[Unit]
+Description=llama.cpp server GPU 0-2
+After=network.target
+
+[Service]
+User=ai6
+WorkingDirectory=/home/ai6/llama.cpp
+Environment="CUDA_VISIBLE_DEVICES=0,1,2"
+Environment="NCCL_DEBUG=WARN"
+ExecStart=/home/ai6/llama.cpp/build/bin/llama-server \
+  -m /var/lib/ollama-models/blobs/sha256-1194192cf2a187eb02722edcc3f77b11d21f537048ce04b67ccf8ba78863006a \
+  -ngl all \
+  -sm tensor \
+  -ts 1,1,1 \
+  -c 32768 \
+  --alias qwen3-coder-30b-gpu012 \
+  --host 0.0.0.0 \
+  --port 8081
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
