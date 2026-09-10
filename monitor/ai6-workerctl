@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ENV_FILE=/etc/ai6-worker-profiles.env
 
 active_profile() {
-  if systemctl is-active --quiet llama2-8081 || systemctl is-active --quiet llama2-8082 || systemctl is-active --quiet llama2-8083; then
+  if systemctl is-enabled --quiet llama2-8081 2>/dev/null; then
     echo 222
   else
     echo 33
@@ -40,8 +40,8 @@ case "${1:-}" in
   profile)
     case "${2:-}" in
       33)
-        systemctl stop llama2-8081 llama2-8082 llama2-8083 2>/dev/null || true
-        systemctl start llama-8081 llama-8082
+        systemctl disable --now llama2-8081 llama2-8082 llama2-8083 2>/dev/null || true
+        systemctl enable --now llama-8081 llama-8082
         ;;
       222)
         [[ -f "$ENV_FILE" ]] || { echo "missing $ENV_FILE"; exit 3; }
@@ -51,8 +51,8 @@ case "${1:-}" in
           echo "MODEL_2GPU is not configured or file does not exist. Current Qwen3-Coder 30B Q4_K is ~18.5 GB and cannot fit on 2x8 GB."
           exit 4
         }
-        systemctl stop llama-8081 llama-8082 2>/dev/null || true
-        systemctl start llama2-8081 llama2-8082 llama2-8083
+        systemctl disable --now llama-8081 llama-8082 2>/dev/null || true
+        systemctl enable --now llama2-8081 llama2-8082 llama2-8083
         ;;
       *) echo "usage: $0 profile 33|222"; exit 2 ;;
     esac
