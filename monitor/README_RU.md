@@ -38,20 +38,28 @@ chmod +x monitor/install.sh
 5. сгенерирует systemd service под **текущего пользователя и фактический путь репозитория**;
 6. включит автозапуск;
 7. проверит `/health` и `/api/stats`;
-8. выведет LAN URL.
+8. выведет актуальный LAN URL.
 
-На эталонной AI6-машине адрес будет примерно:
+Текущий LAN IP можно определить так:
+
+```bash
+ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'
+```
+
+Dashboard:
 
 ```text
-http://10.36.1.164:8090/
+http://<AI6_LAN_IP>:8090/
 ```
 
 API и Swagger:
 
 ```text
-http://10.36.1.164:8090/api/stats
-http://10.36.1.164:8090/docs
+http://<AI6_LAN_IP>:8090/api/stats
+http://<AI6_LAN_IP>:8090/docs
 ```
+
+Адрес хоста не должен быть жёстко прописан: после перехода AI6 в другую LAN используйте новый адрес, выданный DHCP.
 
 ## Проверка
 
