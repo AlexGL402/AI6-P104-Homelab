@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ENV_FILE=/etc/ai6-worker-profiles.env
+
+active_profile() {
+  if systemctl is-active --quiet llama2-8081 || systemctl is-active --quiet llama2-8082 || systemctl is-active --quiet llama2-8083; then
+    echo 222
+  else
+    echo 33
+  fi
+}
+
+svc_for_port() {
+  local p="$1" profile
+  profile="$(active_profile)"
+  case "$profile:$p" in
+    33:8081) echo llama-8081 ;;
+    33:8082) echo llama-8082 ;;
+    222:8081) echo llama2-8081 ;;
+    222:8082) echo llama2-8082 ;;
+    222:8083) echo llama2-8083 ;;
+    *) return 1 ;;
+  esac
+}
+
+case "${1:-}" in
+  status)
+    echo "profile=$(active_profile)"
+    for s in llama-8081 llama-8082 llama2-8081 llama2-8082 llama2-8083; do
+      printf "%s=" "$s"
+      systemctl is-active "$s" 2>/dev/null || true
+    done
+    ;;
+  start|stop|restart)
+    [[ "${2:-}" =~ ^808[123]$ ]] || { echo "invalid port"; exit 2; }
+    svc="$(svc_for_port "$2")" || { echo "port $2 is not part of active profile"; exit 2; }
+    systemctl "$1" "$svc"
+    ;;
+  profile)
+    case "${2:-}" in
+      33)
+        systemctl stop llama2-8081 llama2-8082 llama2-8083 2>/dev/null || true
+        systemctl start llama-8081 llama-8082
+        ;;
+      222)
+        [[ -f "$ENV_FILE" ]] || { echo "missing $ENV_FILE"; exit 3; }
+        # shellcheck disable=SC1090
+        source "$ENV_FILE"
+        [[ -n "${MODEL_2GPU:-}" && -f "${MODEL_2GPU:-}" ]] || {
+          echo "MODEL_2GPU is not configured or file does not exist. Current Qwen3-Coder 30B Q4_K is ~18.5 GB and cannot fit on 2x8 GB."
+          exit 4
+        }
+        systemctl stop llama-8081 llama-8082 2>/dev/null || true
+        systemctl start llama2-8081 llama2-8082 llama2-8083
+        ;;
+      *) echo "usage: $0 profile 33|222"; exit 2 ;;
+    esac
+    ;;
+  *)
+    echo "usage: $0 status | start|stop|restart 8081|8082|8083 | profile 33|222"
+    exit 2
+    ;;
+esac
