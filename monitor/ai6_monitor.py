@@ -80,7 +80,7 @@ def gpu_stats():
             "memory_total_mib": _float(cols[5]),
             "power_w": _float(cols[6]),
             "power_limit_w": _float(cols[7]),
-            "fan_pct": _float(cols[8]),
+            "fan_pct": (lambda x: x if x is not None and 0 <= x <= 100 else None)(_float(cols[8])),
             "graphics_clock_mhz": _float(cols[9]),
             "memory_clock_mhz": _float(cols[10]),
         })
