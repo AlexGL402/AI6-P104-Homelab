@@ -196,3 +196,48 @@ sudo systemctl start ai6-web-terminal
 ```
 
 **Важно:** порт 8091 даёт интерактивный shell на AI6. Не пробрасывайте его напрямую в Интернет.
+
+
+## Управление llama workers из dashboard
+
+В карточке `llama workers` доступны кнопки **Start / Stop / Restart** для каждого worker-а и переключатели профиля:
+
+- `3+3` — текущий проверенный профиль: GPU `0,1,2` -> `8081`, GPU `3,4,5` -> `8082`;
+- `2+2+2` — три worker-а: GPU `0,1` -> `8081`, GPU `2,3` -> `8082`, GPU `4,5` -> `8083`.
+
+Установка безопасного helper-а управления:
+
+```bash
+cd ~/AI6-P104-Homelab
+git pull
+chmod +x monitor/install-worker-control.sh
+./monitor/install-worker-control.sh
+sudo systemctl restart ai6-monitor
+```
+
+Helper разрешает dashboard только ограниченные операции над llama worker services; полный root shell monitor-у не выдаётся.
+
+### Важно про профиль 2+2+2
+
+Текущий Qwen3-Coder 30B Q4_K занимает около 18.5 GB и **не помещается в 2×8 GB VRAM**. Поэтому `2+2+2` намеренно не запустится, пока не задана более компактная GGUF-модель.
+
+Настройка:
+
+```bash
+sudo nano /etc/ai6-worker-profiles.env
+```
+
+Указать:
+
+```text
+MODEL_2GPU=/полный/путь/к/меньшей-модели.gguf
+CTX_2GPU=32768
+```
+
+После этого кнопка `2+2+2` переключит систему на три независимых 2-GPU worker-а. Выбранный профиль сохраняется через systemd enable/disable и переживает reboot.
+
+Вернуться на проверенный Qwen3-Coder 30B профиль можно кнопкой `3+3` или командой:
+
+```bash
+sudo /usr/local/sbin/ai6-workerctl profile 33
+```
