@@ -25,8 +25,10 @@ When launching local web applications:
 2. Use the first free port from 8001 to 8010.
 3. Check that the selected port is free before starting.
 4. Start the application and verify it with an actual HTTP request.
-5. Return the LAN URL as http://10.36.1.164:PORT.
-6. For FastAPI, also return http://10.36.1.164:PORT/docs.
+5. Determine the current LAN IP dynamically. Prefer the default-route source address, for example: `ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'`. If that is unavailable, use the first non-loopback IPv4 address from `hostname -I`.
+6. Return the LAN URL as `http://CURRENT_LAN_IP:PORT`.
+7. For FastAPI, also return `http://CURRENT_LAN_IP:PORT/docs`.
+8. Never hard-code an old LAN address such as 10.36.1.164; always detect the current address at runtime.
 
 If the requested project already exists, modify and reuse it instead of recreating it.
 Avoid unnecessary dependency installs when packages are already available.
