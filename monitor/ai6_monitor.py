@@ -108,6 +108,28 @@ def service_ok(port: int):
         return False
 
 
+def systemd_active(name: str):
+    return subprocess.run(
+        ["systemctl", "is-active", "--quiet", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
+def worker_profile():
+    if any(systemd_active(x) for x in ("llama2-8081", "llama2-8082", "llama2-8083")):
+        return "222"
+    return "33"
+
+
+def run_workerctl(*args):
+    cmd = ["sudo", "/usr/local/sbin/ai6-workerctl", *args]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout or "workerctl failed").strip())
+    return (p.stdout or "").strip()
+
+
 def collect_stats():
     vm = psutil.virtual_memory()
     root = psutil.disk_usage("/")
@@ -155,8 +177,10 @@ def collect_stats():
             "devices": gpus,
         },
         "llama": {
+            "profile": worker_profile(),
             "8081": service_ok(8081),
             "8082": service_ok(8082),
+            "8083": service_ok(8083),
         },
     }
 
@@ -164,6 +188,12 @@ def collect_stats():
 class PsuSample(BaseModel):
     voltage_12v: float = Field(..., ge=0, le=20)
     note: str = Field(default="", max_length=200)
+
+
+class WorkerCommand(BaseModel):
+    action: str
+    port: int | None = None
+    profile: str | None = None
 
 
 @app.get("/api/stats")
@@ -200,6 +230,24 @@ def psu_sample(sample: PsuSample):
     return {"ok": True, "saved": str(CSV_PATH), "sample": row}
 
 
+@app.post("/api/workers/action")
+def worker_action(cmd: WorkerCommand):
+    try:
+        if cmd.action in ("start", "stop", "restart"):
+            if cmd.port not in (8081, 8082, 8083):
+                raise HTTPException(status_code=400, detail="invalid worker port")
+            out = run_workerctl(cmd.action, str(cmd.port))
+        elif cmd.action == "profile":
+            if cmd.profile not in ("33", "222"):
+                raise HTTPException(status_code=400, detail="invalid profile")
+            out = run_workerctl("profile", cmd.profile)
+        else:
+            raise HTTPException(status_code=400, detail="invalid action")
+        return {"ok": True, "output": out}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -218,7 +266,7 @@ body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#e
  <div class="card"><div>CPU</div><div class="big" id="cpu">-</div><div id="cpu2" class="muted"></div></div>
  <div class="card"><div>RAM</div><div class="big" id="ram">-</div><div id="ram2" class="muted"></div></div>
  <div class="card"><div>GPU total power</div><div class="big" id="power">-</div><div id="gputemp" class="muted"></div></div>
- <div class="card"><div>llama workers</div><div class="big" id="workers">-</div><div class="muted">8081 / 8082</div></div>
+ <div class="card"><div>llama workers</div><div class="big" id="workers">-</div><div id="profile" class="muted">profile -</div><div id="workerbuttons" style="margin-top:8px"></div><div style="margin-top:8px"><button onclick="setProfile('33')">3+3</button> <button onclick="setProfile('222')">2+2+2</button></div><div id="workermsg" class="muted" style="margin-top:6px"></div></div>
 </div>
 <div class="grid"><div class="card" style="grid-column:1/-1"><h3>GPUs</h3><div id="gpus"></div></div></div>
 <div class="grid"><div class="card"><h3>PSU 12V sample</h3><p class="muted">Enter the multimeter reading. The current GPU power and temperatures will be logged to CSV on the host.</p><input id="v12" type="number" step="0.01" placeholder="12.05"><input id="note" placeholder="note, e.g. 400W"><button onclick="saveSample()">Save sample</button><div id="saved" class="muted"></div></div></div>
@@ -232,11 +280,16 @@ async function refresh(){
  cpu.textContent=s.cpu.usage_pct.toFixed(1)+'%'; cpu2.textContent='load '+s.cpu.load_1m.toFixed(2)+' / '+s.cpu.load_5m.toFixed(2)+' / '+s.cpu.load_15m.toFixed(2)+(s.cpu.temperature_c!=null?' • '+s.cpu.temperature_c.toFixed(0)+'°C':'');
  ram.textContent=s.memory.usage_pct.toFixed(1)+'%';ram2.textContent=(s.memory.used_bytes/1073741824).toFixed(2)+' / '+(s.memory.total_bytes/1073741824).toFixed(2)+' GiB';
  power.textContent=s.gpu.power_total_w.toFixed(1)+' W';gputemp.innerHTML='max temp <span class="'+cls(s.gpu.temperature_max_c)+'">'+(s.gpu.temperature_max_c??'?')+'°C</span>';
- workers.innerHTML=(s.llama['8081']?'✅':'❌')+' '+(s.llama['8082']?'✅':'❌');
+ workers.innerHTML=(s.llama['8081']?'✅':'❌')+' '+(s.llama['8082']?'✅':'❌')+(s.llama.profile==='222'?' '+(s.llama['8083']?'✅':'❌'):'');
+ profile.textContent='profile '+(s.llama.profile==='222'?'2+2+2':'3+3');
+ const ports=s.llama.profile==='222'?[8081,8082,8083]:[8081,8082];
+ workerbuttons.innerHTML=ports.map(p=>'<div style="margin:5px 0"><b>'+p+'</b> <button onclick="workerAction(\'start\','+p+')">Start</button> <button onclick="workerAction(\'stop\','+p+')">Stop</button> <button onclick="workerAction(\'restart\','+p+')">Restart</button></div>').join('');
  gpus.innerHTML=s.gpu.devices.map(g=>`<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct??'?'}%</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div></div></div>`).join('');
  }catch(e){stamp.textContent='ERROR: '+e.message}
 }
 async function saveSample(){const v=parseFloat(v12.value);if(!Number.isFinite(v))return;saved.textContent='saving...';const r=await fetch('/api/psu-sample',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voltage_12v:v,note:note.value})});const x=await r.json();saved.textContent=r.ok?'saved: '+x.sample.gpu_power_total_w+' W @ '+x.sample.voltage_12v+' V':'error: '+JSON.stringify(x)}
+async function workerAction(action,port){workermsg.textContent=action+' '+port+'...';const r=await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,port})});const x=await r.json();workermsg.textContent=r.ok?'OK: '+action+' '+port:'ERROR: '+(x.detail||JSON.stringify(x));setTimeout(refresh,800)}
+async function setProfile(p){workermsg.textContent='switching profile '+p+'...';const r=await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'profile',profile:p})});const x=await r.json();workermsg.textContent=r.ok?'OK: profile '+p:'ERROR: '+(x.detail||JSON.stringify(x));setTimeout(refresh,1200)}
 function terminalUrl(){return location.protocol+'//'+location.hostname+':8091/'}
 function openTerminal(){window.open(terminalUrl(),'_blank','noopener')}
 function toggleTerminal(){const w=document.getElementById('termwrap'),f=document.getElementById('termframe');if(w.style.display==='none'){if(!f.src)f.src=terminalUrl();w.style.display='block'}else{w.style.display='none'}}
