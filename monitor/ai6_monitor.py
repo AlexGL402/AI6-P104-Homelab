@@ -144,6 +144,7 @@ def collect_stats():
             "hostname": platform.node(),
             "kernel": platform.release(),
             "uptime_s": int(datetime.now().timestamp() - psutil.boot_time()),
+            "lan_ip": socket.gethostbyname(platform.node()) if platform.node() else None,
         },
         "cpu": {
             "usage_pct": psutil.cpu_percent(interval=0.15),
@@ -174,6 +175,8 @@ def collect_stats():
             "count": len(gpus),
             "power_total_w": round(sum(powers), 2),
             "temperature_max_c": max(temps) if temps else None,
+            "memory_used_total_mib": round(sum(g["memory_used_mib"] or 0 for g in gpus), 1),
+            "memory_total_mib": round(sum(g["memory_total_mib"] or 0 for g in gpus), 1),
             "devices": gpus,
         },
         "llama": {
@@ -266,6 +269,10 @@ body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#e
  <div class="card"><div>CPU</div><div class="big" id="cpu">-</div><div id="cpu2" class="muted"></div></div>
  <div class="card"><div>RAM</div><div class="big" id="ram">-</div><div id="ram2" class="muted"></div></div>
  <div class="card"><div>GPU total power</div><div class="big" id="power">-</div><div id="gputemp" class="muted"></div></div>
+ <div class="card"><div>Disk /</div><div class="big" id="disk">-</div><div id="disk2" class="muted"></div></div>
+ <div class="card"><div>Network</div><div class="big" id="net">-</div><div id="net2" class="muted"></div></div>
+ <div class="card"><div>System</div><div class="big" id="uptime">-</div><div id="system2" class="muted"></div></div>
+ <div class="card"><div>GPU VRAM</div><div class="big" id="vramtotal">-</div><div id="vramtotal2" class="muted"></div></div>
  <div class="card"><div>llama workers</div><div class="big" id="workers">-</div><div id="profile" class="muted">profile -</div><div id="workerbuttons" style="margin-top:8px"></div><div style="margin-top:8px"><button onclick="setProfile('33')">3+3</button> <button onclick="setProfile('222')">2+2+2</button></div><div id="workermsg" class="muted" style="margin-top:6px"></div></div>
 </div>
 <div class="grid"><div class="card" style="grid-column:1/-1"><h3>GPUs</h3><div id="gpus"></div></div></div>
@@ -273,13 +280,23 @@ body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#e
 <div class="grid"><div class="card" style="grid-column:1/-1"><h3>Web Terminal</h3><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div></div>
 <script>
 const mib=(v)=>v==null?'?':(v/1024).toFixed(2)+' GiB';
+const gib=(v)=>v==null?'?':(v/1073741824).toFixed(2)+' GiB';
 const cls=(t)=>t==null?'':(t>=80?'bad':t>=65?'warn':'ok');
+const fmtUptime=(s)=>{s=Math.max(0,Math.floor(s||0));const d=Math.floor(s/86400);s%=86400;const h=Math.floor(s/3600);s%=3600;const m=Math.floor(s/60);return (d?d+'d ':'')+h+'h '+m+'m'};
+let prevNet=null,prevNetTs=null;
 async function refresh(){
  try{const r=await fetch('/api/stats');const s=await r.json();if(!r.ok)throw new Error(JSON.stringify(s));
  document.getElementById('stamp').textContent=s.host.hostname+' • '+new Date(s.timestamp).toLocaleString();
  cpu.textContent=s.cpu.usage_pct.toFixed(1)+'%'; cpu2.textContent='load '+s.cpu.load_1m.toFixed(2)+' / '+s.cpu.load_5m.toFixed(2)+' / '+s.cpu.load_15m.toFixed(2)+(s.cpu.temperature_c!=null?' • '+s.cpu.temperature_c.toFixed(0)+'°C':'');
  ram.textContent=s.memory.usage_pct.toFixed(1)+'%';ram2.textContent=(s.memory.used_bytes/1073741824).toFixed(2)+' / '+(s.memory.total_bytes/1073741824).toFixed(2)+' GiB';
  power.textContent=s.gpu.power_total_w.toFixed(1)+' W';gputemp.innerHTML='max temp <span class="'+cls(s.gpu.temperature_max_c)+'">'+(s.gpu.temperature_max_c??'?')+'°C</span>';
+ disk.textContent=s.disk.usage_pct.toFixed(1)+'%';disk2.textContent=gib(s.disk.used_bytes)+' used • '+gib(s.disk.free_bytes)+' free / '+gib(s.disk.total_bytes);
+ uptime.textContent=fmtUptime(s.host.uptime_s);system2.textContent=(s.host.lan_ip||location.hostname)+' • kernel '+s.host.kernel;
+ vramtotal.textContent=mib(s.gpu.memory_used_total_mib);vramtotal2.textContent='used / '+mib(s.gpu.memory_total_mib)+' total • '+s.gpu.count+' GPUs';
+ const now=Date.now()/1000;
+ if(prevNet && prevNetTs){const dt=Math.max(.1,now-prevNetTs);const rx=(s.network.bytes_recv-prevNet.rx)*8/dt/1e6;const tx=(s.network.bytes_sent-prevNet.tx)*8/dt/1e6;net.textContent='↓ '+rx.toFixed(2)+' Mbps';net2.textContent='↑ '+tx.toFixed(2)+' Mbps • total ↓ '+gib(s.network.bytes_recv)+' ↑ '+gib(s.network.bytes_sent)}
+ else{net.textContent='warming…';net2.textContent='total ↓ '+gib(s.network.bytes_recv)+' ↑ '+gib(s.network.bytes_sent)}
+ prevNet={rx:s.network.bytes_recv,tx:s.network.bytes_sent};prevNetTs=now;
  workers.innerHTML=(s.llama['8081']?'✅':'❌')+' '+(s.llama['8082']?'✅':'❌')+(s.llama.profile==='222'?' '+(s.llama['8083']?'✅':'❌'):'');
  profile.textContent='profile '+(s.llama.profile==='222'?'2+2+2':'3+3');
  const ports=s.llama.profile==='222'?[8081,8082,8083]:[8081,8082];
