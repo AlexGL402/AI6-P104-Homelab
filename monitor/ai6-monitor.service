@@ -1,0 +1,20 @@
+[Unit]
+Description=AI6 Host Resource Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/ai6-monitor/ai6-monitor.py
+Environment=AI6_MONITOR_HOST=0.0.0.0
+Environment=AI6_MONITOR_PORT=8090
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/proc /sys
+
+[Install]
+WantedBy=multi-user.target
