@@ -2,6 +2,15 @@
 
 Ultra-budget local AI homelab built around six NVIDIA P104-100 8 GB GPUs, llama.cpp, Qwen3-Coder, Open WebUI, and Open Terminal.
 
+## Quick links
+
+- [Русская инструкция по развёртыванию на второй машине](INSTALL_RU.md)
+- [Deployment notes](deploy/README.md)
+- [Benchmark summary](benchmarks/2026-09-10-summary.md)
+- [External benchmark comparison](benchmarks/external-comparison.md)
+- [Agent tests](benchmarks/agent-tests.md)
+- [Coding-agent system prompt](configs/coding-agent-system-prompt.md)
+
 ## Highlights
 
 - 6× NVIDIA P104-100 8 GB = 48 GB aggregate VRAM
@@ -110,14 +119,14 @@ Qwen 30B   Qwen 30B
 
 All GPUs negotiate PCIe x1 on this mining motherboard and CUDA P2P is unavailable between cards. Tensor-parallel scaling therefore becomes worse as more GPUs participate in a single request. Splitting the machine into multiple independent workers is the practical workaround.
 
-## Repository plan
-
-More detailed files will be added under:
+## Repository layout
 
 ```text
 benchmarks/
-docs/
 configs/
+deploy/
+docs/
+INSTALL_RU.md
 ```
 
 The goal of this repository is to preserve the exact hardware, software stack, benchmark results, and practical agent setup for future comparison and upgrades.
