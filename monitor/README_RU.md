@@ -1,94 +1,64 @@
 # AI6 Host Monitor — установка
 
-Этот сервис работает **на Ubuntu-хосте**, а не внутри Open Terminal. Поэтому он видит реальные данные `nvidia-smi` по всем 6× P104-100 и одновременно читает CPU/RAM через `psutil`.
+Этот сервис работает **на Ubuntu-хосте**, а не внутри Open Terminal. Поэтому он видит реальные данные `nvidia-smi` по всем NVIDIA GPU и одновременно читает CPU/RAM хоста.
 
 ## Что показывает
 
-- CPU usage и load average
-- CPU temperature, если её отдаёт Linux sensors interface
+- CPU usage, load average и температуру, если она доступна
 - RAM usage
 - disk usage
 - network counters
-- все NVIDIA GPU:
-  - utilization
-  - temperature
-  - power draw
-  - power limit
-  - VRAM used/total
-  - fan
-  - graphics/memory clocks
+- все NVIDIA GPU: utilization, temperature, power draw, power limit, VRAM, fan, clocks
 - суммарную мощность всех GPU
-- max GPU temperature
+- максимальную температуру GPU
 - доступность llama workers на `8081` и `8082`
 - ручное сохранение показания линии `12V` с мультиметра в CSV
 
-## Установка
+Dashboard обновляется каждые 2 секунды.
+
+## Быстрая установка
+
+На AI6-хосте:
 
 ```bash
 cd ~/AI6-P104-Homelab
 git pull
-
 sudo apt update
 sudo apt install -y python3-venv
-
-cd monitor
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+chmod +x monitor/install.sh
+./monitor/install.sh
 ```
 
-Проверить, что на **хосте** работает NVIDIA:
+Установщик автоматически:
 
-```bash
-nvidia-smi
-```
+1. проверит `nvidia-smi` и наличие NVIDIA GPU;
+2. создаст Python venv;
+3. установит FastAPI, uvicorn и psutil;
+4. создаст `/var/lib/ai6-monitor`;
+5. сгенерирует systemd service под **текущего пользователя и фактический путь репозитория**;
+6. включит автозапуск;
+7. проверит `/health` и `/api/stats`;
+8. выведет LAN URL.
 
-Должны быть видны все 6 P104-100.
-
-## Первый ручной запуск
-
-```bash
-cd ~/AI6-P104-Homelab/monitor
-.venv/bin/uvicorn ai6_monitor:app --host 0.0.0.0 --port 8090
-```
-
-С другого ПК открыть:
+На эталонной AI6-машине адрес будет примерно:
 
 ```text
 http://10.36.1.164:8090/
 ```
 
-API:
+API и Swagger:
 
 ```text
 http://10.36.1.164:8090/api/stats
 http://10.36.1.164:8090/docs
 ```
 
-Проверка локально:
-
-```bash
-curl http://127.0.0.1:8090/health
-curl http://127.0.0.1:8090/api/stats
-```
-
-## Установка как systemd service
-
-В репозитории есть `configs/ai6-monitor.service` с путями для пользователя `ai6`.
-
-```bash
-sudo mkdir -p /var/lib/ai6-monitor
-sudo chown ai6:ai6 /var/lib/ai6-monitor
-
-sudo cp ~/AI6-P104-Homelab/configs/ai6-monitor.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ai6-monitor
-```
-
-Проверить:
+## Проверка
 
 ```bash
 systemctl --no-pager --full status ai6-monitor
 curl http://127.0.0.1:8090/health
+curl http://127.0.0.1:8090/api/stats | python3 -m json.tool
 ```
 
 Логи:
@@ -97,30 +67,28 @@ curl http://127.0.0.1:8090/health
 journalctl -u ai6-monitor -f
 ```
 
+Перезапуск:
+
+```bash
+sudo systemctl restart ai6-monitor
+```
+
 ## Тест БП по ступеням нагрузки
 
 На dashboard есть поле `PSU 12V sample`.
 
 Порядок теста:
 
-1. Создать стабильную нагрузку на GPU.
+1. Создать стабильную GPU-нагрузку.
 2. Дождаться стабилизации `GPU total power`.
-3. Мультиметром измерить +12V на свободном PCIe/Molex разъёме того же БП.
+3. Мультиметром измерить +12 V на свободном PCIe/Molex-разъёме **этого же БП**.
 4. Ввести, например, `12.06` в dashboard.
-5. В `note` написать `200W`, `400W`, `beep starts` и т.п.
+5. В `note` написать `100W`, `200W`, `beep starts` и т.п.
 6. Нажать `Save sample`.
 
-Сервис одновременно сохранит:
+Сервис сохранит timestamp, 12 V, суммарную GPU power, max GPU temperature, CPU usage, RAM usage и note.
 
-- timestamp
-- измеренные вручную 12V
-- текущий суммарный GPU power
-- max GPU temperature
-- CPU usage
-- RAM usage
-- note
-
-CSV находится здесь:
+CSV:
 
 ```text
 /var/lib/ai6-monitor/psu-test.csv
@@ -138,25 +106,36 @@ column -s, -t < /var/lib/ai6-monitor/psu-test.csv
 cat /var/lib/ai6-monitor/psu-test.csv
 ```
 
-## Почему не внутри Open Terminal
+Пример серии измерений:
 
-Open Terminal специально остаётся изолированным coding-container. Сейчас внутри него нет `nvidia-smi`, поэтому отдавать ему GPU runtime только ради мониторинга не требуется.
+| Этап | GPU total | 12 V | Писк |
+|---|---:|---:|---|
+| idle | ~60 W | ... | нет |
+| 1 | ~100 W | ... | ... |
+| 2 | ~200 W | ... | ... |
+| 3 | ~300 W | ... | ... |
+| 4 | ~400 W | ... | ... |
+| 5 | ~500 W | ... | ... |
+| 6 | ~600 W | ... | ... |
 
-Схема:
+Не вскрывайте БП и не измеряйте первичную/сетевую часть. Для этого теста достаточно внешнего низковольтного +12 V разъёма.
+
+## Почему монитор не внутри Open Terminal
+
+Open Terminal специально остаётся изолированным coding-container. Сейчас внутри него нет `nvidia-smi`. Пробрасывать GPU runtime в coding-container только ради мониторинга не нужно.
 
 ```text
 Ubuntu host
-  ├─ nvidia-smi -> 6× P104
-  ├─ psutil -> CPU/RAM
+  ├─ nvidia-smi -> NVIDIA GPUs
+  ├─ psutil -> CPU/RAM/disk/network
   └─ AI6 Host Monitor :8090
-          |
-          +-> dashboard /
-          +-> /api/stats
-          +-> /api/psu-sample
+          ├─ dashboard /
+          ├─ /api/stats
+          └─ /api/psu-sample
 
-Open Terminal остаётся отдельным контейнером.
+Open Terminal остаётся отдельным Docker-контейнером.
 ```
 
-## Важно
+## Безопасность
 
-Порт `8090` сейчас слушает `0.0.0.0`, то есть доступен в LAN. Не пробрасывайте его в интернет без firewall/auth/reverse proxy.
+Порт `8090` слушает `0.0.0.0`, чтобы dashboard был доступен в LAN. В сервисе нет авторизации. Не пробрасывайте `8090` напрямую в Интернет; для внешнего доступа используйте VPN или reverse proxy с аутентификацией.
