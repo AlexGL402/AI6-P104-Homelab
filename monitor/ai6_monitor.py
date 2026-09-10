@@ -222,6 +222,7 @@ body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#e
 </div>
 <div class="grid"><div class="card" style="grid-column:1/-1"><h3>GPUs</h3><div id="gpus"></div></div></div>
 <div class="grid"><div class="card"><h3>PSU 12V sample</h3><p class="muted">Enter the multimeter reading. The current GPU power and temperatures will be logged to CSV on the host.</p><input id="v12" type="number" step="0.01" placeholder="12.05"><input id="note" placeholder="note, e.g. 400W"><button onclick="saveSample()">Save sample</button><div id="saved" class="muted"></div></div></div>
+<div class="grid"><div class="card" style="grid-column:1/-1"><h3>Web Terminal</h3><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div></div>
 <script>
 const mib=(v)=>v==null?'?':(v/1024).toFixed(2)+' GiB';
 const cls=(t)=>t==null?'':(t>=80?'bad':t>=65?'warn':'ok');
@@ -236,6 +237,9 @@ async function refresh(){
  }catch(e){stamp.textContent='ERROR: '+e.message}
 }
 async function saveSample(){const v=parseFloat(v12.value);if(!Number.isFinite(v))return;saved.textContent='saving...';const r=await fetch('/api/psu-sample',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voltage_12v:v,note:note.value})});const x=await r.json();saved.textContent=r.ok?'saved: '+x.sample.gpu_power_total_w+' W @ '+x.sample.voltage_12v+' V':'error: '+JSON.stringify(x)}
+function terminalUrl(){return location.protocol+'//'+location.hostname+':8091/'}
+function openTerminal(){window.open(terminalUrl(),'_blank','noopener')}
+function toggleTerminal(){const w=document.getElementById('termwrap'),f=document.getElementById('termframe');if(w.style.display==='none'){if(!f.src)f.src=terminalUrl();w.style.display='block'}else{w.style.display='none'}}
 refresh();setInterval(refresh,2000);
 </script></body></html>'''
 
