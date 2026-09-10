@@ -38,7 +38,7 @@ WorkingDirectory=${HOME}/llama.cpp
 Environment="CUDA_VISIBLE_DEVICES=${gpus}"
 Environment="NCCL_DEBUG=WARN"
 EnvironmentFile=${ENV_FILE}
-ExecStart=/bin/bash -lc 'exec "${LLAMA_BIN}" -m "$MODEL_2GPU" -ngl all -sm tensor -ts 1,1 -c "${CTX_2GPU:-32768}" --alias ${alias} --host 0.0.0.0 --port ${port}'
+ExecStart=/bin/bash -lc 'exec "${LLAMA_BIN}" -m "\$MODEL_2GPU" -ngl all -sm tensor -ts 1,1 -c "\${CTX_2GPU:-32768}" --alias ${alias} --host 0.0.0.0 --port ${port}'
 Restart=always
 RestartSec=5
 
