@@ -1,0 +1,16 @@
+[Unit]
+Description=AI6 Host Resource Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=ai6
+WorkingDirectory=/home/ai6/AI6-P104-Homelab/monitor
+Environment=PYTHONUNBUFFERED=1
+Environment=AI6_MONITOR_CSV=/var/lib/ai6-monitor/psu-test.csv
+ExecStart=/home/ai6/AI6-P104-Homelab/monitor/.venv/bin/uvicorn ai6_monitor:app --host 0.0.0.0 --port 8090
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
