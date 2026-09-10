@@ -20,7 +20,13 @@ docker run -d \
 LAN URL:
 
 ```text
-http://10.36.1.164:3000
+http://<AI6_LAN_IP>:3000
+```
+
+Get the current LAN IP from the default route:
+
+```bash
+ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'
 ```
 
 ## Open Terminal
@@ -55,15 +61,25 @@ In Open WebUI:
 Admin -> Settings -> Integrations -> Open Terminal
 ```
 
-The working connection in this LAN environment is:
+Portable connection configuration:
 
 ```text
-URL: http://10.36.1.164:8000
+URL: http://host.docker.internal:8000
 Auth: Bearer
 API key: <OPEN_TERMINAL_API_KEY>
 ```
 
-Using `host.docker.internal:8000` passed simple connectivity checks but did not work correctly for the Open WebUI terminal integration in this installation. Using the host LAN IP fixed the connection.
+`host.docker.internal` is mapped to the Docker host through `host-gateway`, so this configuration keeps working if the AI6 machine receives a different LAN address.
+
+Verified from inside the Open WebUI container:
+
+```bash
+docker exec open-webui getent hosts host.docker.internal
+docker exec open-webui curl -s -o /dev/null -w 'HTTP %{http_code}\n' \
+  http://host.docker.internal:8000/openapi.json
+```
+
+Expected result: the hostname resolves to the Docker host gateway and the HTTP check returns `200`.
 
 ## Authentication troubleshooting
 
@@ -81,12 +97,12 @@ curl -i \
 
 Expected response: HTTP 200.
 
-The same test can be issued from the Open WebUI container:
+The same test from the Open WebUI container:
 
 ```bash
 docker exec open-webui curl -i \
   -H "Authorization: Bearer $KEY" \
-  http://10.36.1.164:8000/system
+  http://host.docker.internal:8000/system
 ```
 
 ## Verified coding-agent workflow
@@ -105,8 +121,8 @@ The setup has successfully completed end-to-end tasks where Qwen3-Coder:
 Example development URLs:
 
 ```text
-http://10.36.1.164:8001
-http://10.36.1.164:8001/docs
+http://<AI6_LAN_IP>:8001
+http://<AI6_LAN_IP>:8001/docs
 ```
 
-The application must bind to `0.0.0.0` inside Open Terminal for Docker port publishing to make it reachable from the LAN.
+The application must bind to `0.0.0.0` inside Open Terminal for Docker port publishing to make it reachable from the LAN. The coding-agent system prompt should detect the current LAN address dynamically instead of storing a fixed IP.
