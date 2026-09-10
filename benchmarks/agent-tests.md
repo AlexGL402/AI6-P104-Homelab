@@ -53,10 +53,10 @@ The model:
 
 Verified from a separate Windows PC on the LAN:
 
-- `http://10.36.1.164:8001/` returned `{"Hello":"World"}`
-- `http://10.36.1.164:8001/docs` opened FastAPI Swagger UI
+- `http://<AI6_LAN_IP>:8001/` returned `{"Hello":"World"}`
+- `http://<AI6_LAN_IP>:8001/docs` opened FastAPI Swagger UI
 
-This confirmed real network access from the generated application, not merely an internal tool result.
+The actual LAN address is intentionally not stored in this document because AI6 may receive a different address after moving to another network. This confirmed real network access from the generated application, not merely an internal tool result.
 
 ## Test 3 — modify an existing project
 
@@ -92,6 +92,7 @@ A system-prompt rule was added to prefer:
 - first-free-port selection from 8001-8010
 - verification of the exact listening port after launch
 - an actual HTTP request before claiming success
+- dynamic detection of the current LAN address before returning browser URLs
 
 ## Assessment
 
