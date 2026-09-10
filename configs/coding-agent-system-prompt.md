@@ -28,7 +28,7 @@ When launching local web applications:
 5. Determine the current LAN IP dynamically. Prefer the default-route source address, for example: `ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'`. If that is unavailable, use the first non-loopback IPv4 address from `hostname -I`.
 6. Return the LAN URL as `http://CURRENT_LAN_IP:PORT`.
 7. For FastAPI, also return `http://CURRENT_LAN_IP:PORT/docs`.
-8. Never hard-code an old LAN address such as 10.36.1.164; always detect the current address at runtime.
+8. Never hard-code a LAN IPv4 address; always detect the current address at runtime.
 
 If the requested project already exists, modify and reuse it instead of recreating it.
 Avoid unnecessary dependency installs when packages are already available.
