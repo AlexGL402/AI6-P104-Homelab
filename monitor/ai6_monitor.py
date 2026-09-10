@@ -4,6 +4,10 @@ import os
 import platform
 import socket
 import subprocess
+import json
+import urllib.request
+import urllib.error
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -130,6 +134,69 @@ def run_workerctl(*args):
     return (p.stdout or "").strip()
 
 
+
+def worker_details(port: int):
+    """Best-effort llama.cpp worker metadata without making monitor health depend on it."""
+    active = service_ok(port)
+    info = {
+        "active": active,
+        "model": None,
+        "last_tok_s": None,
+        "last_prompt_tok_s": None,
+        "last_prompt_tokens": None,
+        "uptime_s": None,
+    }
+    if not active:
+        return info
+
+    # OpenAI-compatible model alias.
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=0.5) as r:
+            data = json.load(r)
+        models = data.get("data") or []
+        if models:
+            info["model"] = models[0].get("id")
+    except Exception:
+        pass
+
+    # Service uptime and last llama.cpp timing lines.
+    service = f"llama2-{port}" if systemd_active(f"llama2-{port}") else f"llama-{port}"
+    try:
+        p = subprocess.run(
+            ["systemctl", "show", service, "--property=ActiveEnterTimestampMonotonic", "--value"],
+            capture_output=True, text=True, timeout=1,
+        )
+        entered = int((p.stdout or "0").strip() or 0)
+        if entered:
+            boot_us = int((datetime.now().timestamp() - psutil.boot_time()) * 1_000_000)
+            info["uptime_s"] = max(0, int((boot_us - entered) / 1_000_000))
+    except Exception:
+        pass
+
+    try:
+        p = subprocess.run(
+            ["journalctl", "-u", service, "-n", "120", "--no-pager", "-o", "cat"],
+            capture_output=True, text=True, timeout=2,
+        )
+        lines = (p.stdout or "").splitlines()
+        for line in reversed(lines):
+            if info["last_tok_s"] is None and "eval time" in line and "tokens per second" in line and "prompt eval time" not in line:
+                m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s+tokens per second", line)
+                if m:
+                    info["last_tok_s"] = float(m.group(1))
+            if info["last_prompt_tok_s"] is None and "prompt eval time" in line:
+                m = re.search(r"/\s+(\d+)\s+tokens.*?([0-9]+(?:\.[0-9]+)?)\s+tokens per second", line)
+                if m:
+                    info["last_prompt_tokens"] = int(m.group(1))
+                    info["last_prompt_tok_s"] = float(m.group(2))
+            if info["last_tok_s"] is not None and info["last_prompt_tok_s"] is not None:
+                break
+    except Exception:
+        pass
+    return info
+
+
+
 def collect_stats():
     vm = psutil.virtual_memory()
     root = psutil.disk_usage("/")
@@ -184,6 +251,7 @@ def collect_stats():
             "8081": service_ok(8081),
             "8082": service_ok(8082),
             "8083": service_ok(8083),
+            "workers": {str(p): worker_details(p) for p in (8081, 8082, 8083)},
         },
     }
 
@@ -300,7 +368,7 @@ async function refresh(){
  workers.innerHTML=(s.llama['8081']?'✅':'❌')+' '+(s.llama['8082']?'✅':'❌')+(s.llama.profile==='222'?' '+(s.llama['8083']?'✅':'❌'):'');
  profile.textContent='profile '+(s.llama.profile==='222'?'2+2+2':'3+3');
  const ports=s.llama.profile==='222'?[8081,8082,8083]:[8081,8082];
- workerbuttons.innerHTML=ports.map(p=>'<div style="margin:5px 0"><b>'+p+'</b> <button onclick="workerAction(\'start\','+p+')">Start</button> <button onclick="workerAction(\'stop\','+p+')">Stop</button> <button onclick="workerAction(\'restart\','+p+')">Restart</button></div>').join('');
+ workerbuttons.innerHTML=ports.map(p=>{const w=(s.llama.workers||{})[String(p)]||{};const model=w.model||'model ?';const speed=w.last_tok_s!=null?w.last_tok_s.toFixed(2)+' tok/s':'tok/s ?';const ctx=w.last_prompt_tokens!=null?w.last_prompt_tokens+' prompt':'prompt ?';const up=w.uptime_s!=null?fmtUptime(w.uptime_s):'?';return '<div style="margin:8px 0;padding-top:6px;border-top:1px solid #333"><b>'+p+'</b> <span class="muted">'+model+' • '+speed+' • '+ctx+' • up '+up+'</span><br><button onclick="workerAction(\'start\','+p+')">Start</button> <button onclick="workerAction(\'stop\','+p+')">Stop</button> <button onclick="workerAction(\'restart\','+p+')">Restart</button></div>'}).join('');
  gpus.innerHTML=s.gpu.devices.map(g=>`<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct??'?'}%</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div></div></div>`).join('');
  }catch(e){stamp.textContent='ERROR: '+e.message}
 }
