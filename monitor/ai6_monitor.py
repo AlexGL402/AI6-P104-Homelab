@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 import csv
+import json
 import os
 import platform
+import re
 import socket
 import subprocess
-import json
-import urllib.request
 import urllib.error
-import re
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 APP_TITLE = "AI6 Host Monitor"
 CSV_PATH = Path(os.environ.get("AI6_MONITOR_CSV", "/var/lib/ai6-monitor/psu-test.csv"))
 
-app = FastAPI(title=APP_TITLE, version="1.0.0")
+app = FastAPI(title=APP_TITLE, version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -75,6 +75,9 @@ def gpu_stats():
         cols = [x.strip() for x in line.split(",")]
         if len(cols) != len(fields):
             continue
+        fan = _float(cols[8])
+        if fan is not None and not (0 <= fan <= 100):
+            fan = None
         gpus.append({
             "index": _int(cols[0]),
             "name": cols[1],
@@ -84,7 +87,7 @@ def gpu_stats():
             "memory_total_mib": _float(cols[5]),
             "power_w": _float(cols[6]),
             "power_limit_w": _float(cols[7]),
-            "fan_pct": (lambda x: x if x is not None and 0 <= x <= 100 else None)(_float(cols[8])),
+            "fan_pct": fan,
             "graphics_clock_mhz": _float(cols[9]),
             "memory_clock_mhz": _float(cols[10]),
         })
@@ -106,7 +109,7 @@ def cpu_temperature():
 
 def service_ok(port: int):
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+        with socket.create_connection(("127.0.0.1", port), timeout=0.35):
             return True
     except OSError:
         return False
@@ -120,10 +123,16 @@ def systemd_active(name: str):
     ).returncode == 0
 
 
+def systemd_enabled(name: str):
+    return subprocess.run(
+        ["systemctl", "is-enabled", "--quiet", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
 def worker_profile():
-    if any(systemd_active(x) for x in ("llama2-8081", "llama2-8082", "llama2-8083")):
-        return "222"
-    return "33"
+    return "222" if systemd_enabled("llama2-8081") else "33"
 
 
 def run_workerctl(*args):
@@ -134,12 +143,51 @@ def run_workerctl(*args):
     return (p.stdout or "").strip()
 
 
+def lan_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("1.1.1.1", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        try:
+            return socket.gethostbyname(platform.node())
+        except Exception:
+            return None
+
+
+def _health_state(port: int, active: bool):
+    if not active:
+        return "down", "Down"
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.7) as r:
+            data = json.load(r)
+        if data.get("status") == "ok":
+            return "ready", "Ready"
+        return "starting", str(data.get("status") or "Starting")
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode("utf-8", "replace"))
+            err = data.get("error") or {}
+            msg = str(err.get("message") or data.get("detail") or f"HTTP {e.code}")
+        except Exception:
+            msg = f"HTTP {e.code}"
+        if e.code == 503 and "loading" in msg.lower():
+            return "loading", "Loading model"
+        return "error", msg
+    except Exception:
+        return "starting", "Starting"
+
 
 def worker_details(port: int):
-    """Best-effort llama.cpp worker metadata without making monitor health depend on it."""
     active = service_ok(port)
+    state, status_text = _health_state(port, active)
     info = {
         "active": active,
+        "ready": state == "ready",
+        "state": state,
+        "status_text": status_text,
         "model": None,
         "last_tok_s": None,
         "last_prompt_tok_s": None,
@@ -149,17 +197,16 @@ def worker_details(port: int):
     if not active:
         return info
 
-    # OpenAI-compatible model alias.
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=0.5) as r:
-            data = json.load(r)
-        models = data.get("data") or []
-        if models:
-            info["model"] = models[0].get("id")
-    except Exception:
-        pass
+    if state == "ready":
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=0.7) as r:
+                data = json.load(r)
+            models = data.get("data") or []
+            if models:
+                info["model"] = models[0].get("id")
+        except Exception:
+            pass
 
-    # Service uptime and last llama.cpp timing lines.
     service = f"llama2-{port}" if systemd_active(f"llama2-{port}") else f"llama-{port}"
     try:
         p = subprocess.run(
@@ -196,7 +243,6 @@ def worker_details(port: int):
     return info
 
 
-
 def collect_stats():
     vm = psutil.virtual_memory()
     root = psutil.disk_usage("/")
@@ -204,6 +250,7 @@ def collect_stats():
     gpus = gpu_stats()
     powers = [g["power_w"] for g in gpus if g["power_w"] is not None]
     temps = [g["temperature_c"] for g in gpus if g["temperature_c"] is not None]
+    workers = {str(p): worker_details(p) for p in (8081, 8082, 8083)}
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -211,7 +258,7 @@ def collect_stats():
             "hostname": platform.node(),
             "kernel": platform.release(),
             "uptime_s": int(datetime.now().timestamp() - psutil.boot_time()),
-            "lan_ip": socket.gethostbyname(platform.node()) if platform.node() else None,
+            "lan_ip": lan_ip(),
         },
         "cpu": {
             "usage_pct": psutil.cpu_percent(interval=0.15),
@@ -248,10 +295,10 @@ def collect_stats():
         },
         "llama": {
             "profile": worker_profile(),
-            "8081": service_ok(8081),
-            "8082": service_ok(8082),
-            "8083": service_ok(8083),
-            "workers": {str(p): worker_details(p) for p in (8081, 8082, 8083)},
+            "8081": workers["8081"]["active"],
+            "8082": workers["8082"]["active"],
+            "8083": workers["8083"]["active"],
+            "workers": workers,
         },
     }
 
@@ -330,7 +377,7 @@ DASHBOARD = r'''<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI6 Host Monitor</title>
 <style>
-body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#eee}h1{margin:0 0 6px}.muted{color:#aaa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px}.card{background:#1b1b1b;border:1px solid #333;border-radius:12px;padding:14px}.big{font-size:28px;font-weight:700}.gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid #333;padding:9px 0}.gpu:first-child{border-top:0}.ok{color:#7be495}.warn{color:#ffd166}.bad{color:#ff6b6b}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:#eee}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}</style>
+body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#eee}h1{margin:0 0 6px}.muted{color:#aaa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px}.card{background:#1b1b1b;border:1px solid #333;border-radius:12px;padding:14px}.big{font-size:28px;font-weight:700}.gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid #333;padding:9px 0}.gpu:first-child{border-top:0}.ok{color:#7be495}.warn{color:#ffd166}.bad{color:#ff6b6b}.status{font-weight:700}.ready{color:#7be495}.loading,.starting{color:#ffd166}.down,.error{color:#ff6b6b}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:#eee}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}</style>
 </head><body>
 <h1>AI6 Host Monitor</h1><div class="muted" id="stamp">loading...</div>
 <div class="grid">
@@ -351,6 +398,7 @@ const mib=(v)=>v==null?'?':(v/1024).toFixed(2)+' GiB';
 const gib=(v)=>v==null?'?':(v/1073741824).toFixed(2)+' GiB';
 const cls=(t)=>t==null?'':(t>=80?'bad':t>=65?'warn':'ok');
 const fmtUptime=(s)=>{s=Math.max(0,Math.floor(s||0));const d=Math.floor(s/86400);s%=86400;const h=Math.floor(s/3600);s%=3600;const m=Math.floor(s/60);return (d?d+'d ':'')+h+'h '+m+'m'};
+const stateIcon=(w)=>w.state==='ready'?'✅':(w.state==='loading'||w.state==='starting')?'⏳':'❌';
 let prevNet=null,prevNetTs=null;
 async function refresh(){
  try{const r=await fetch('/api/stats');const s=await r.json();if(!r.ok)throw new Error(JSON.stringify(s));
@@ -365,11 +413,12 @@ async function refresh(){
  if(prevNet && prevNetTs){const dt=Math.max(.1,now-prevNetTs);const rx=(s.network.bytes_recv-prevNet.rx)*8/dt/1e6;const tx=(s.network.bytes_sent-prevNet.tx)*8/dt/1e6;net.textContent='↓ '+rx.toFixed(2)+' Mbps';net2.textContent='↑ '+tx.toFixed(2)+' Mbps • total ↓ '+gib(s.network.bytes_recv)+' ↑ '+gib(s.network.bytes_sent)}
  else{net.textContent='warming…';net2.textContent='total ↓ '+gib(s.network.bytes_recv)+' ↑ '+gib(s.network.bytes_sent)}
  prevNet={rx:s.network.bytes_recv,tx:s.network.bytes_sent};prevNetTs=now;
- workers.innerHTML=(s.llama['8081']?'✅':'❌')+' '+(s.llama['8082']?'✅':'❌')+(s.llama.profile==='222'?' '+(s.llama['8083']?'✅':'❌'):'');
- profile.textContent='profile '+(s.llama.profile==='222'?'2+2+2':'3+3');
  const ports=s.llama.profile==='222'?[8081,8082,8083]:[8081,8082];
- workerbuttons.innerHTML=ports.map(p=>{const w=(s.llama.workers||{})[String(p)]||{};const model=w.model||'model ?';const speed=w.last_tok_s!=null?w.last_tok_s.toFixed(2)+' tok/s':'tok/s ?';const ctx=w.last_prompt_tokens!=null?w.last_prompt_tokens+' prompt':'prompt ?';const up=w.uptime_s!=null?fmtUptime(w.uptime_s):'?';return '<div style="margin:8px 0;padding-top:6px;border-top:1px solid #333"><b>'+p+'</b> <span class="muted">'+model+' • '+speed+' • '+ctx+' • up '+up+'</span><br><button onclick="workerAction(\'start\','+p+')">Start</button> <button onclick="workerAction(\'stop\','+p+')">Stop</button> <button onclick="workerAction(\'restart\','+p+')">Restart</button></div>'}).join('');
- gpus.innerHTML=s.gpu.devices.map(g=>`<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct??'?'}%</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div></div></div>`).join('');
+ const ws=s.llama.workers||{};
+ workers.innerHTML=ports.map(p=>stateIcon(ws[String(p)]||{})).join(' ');
+ profile.textContent='profile '+(s.llama.profile==='222'?'2+2+2':'3+3')+' • ✅ Ready  ⏳ Loading  ❌ Down';
+ workerbuttons.innerHTML=ports.map(p=>{const w=ws[String(p)]||{};const model=w.model||((w.state==='loading')?'loading model…':'model ?');const speed=w.last_tok_s!=null?w.last_tok_s.toFixed(2)+' tok/s':'tok/s ?';const ctx=w.last_prompt_tokens!=null?w.last_prompt_tokens+' prompt':'prompt ?';const up=w.uptime_s!=null?fmtUptime(w.uptime_s):'?';const mapping=s.llama.profile==='222'?(p===8081?'GPU 0,1':p===8082?'GPU 2,3':'GPU 4,5'):(p===8081?'GPU 0,1,2':'GPU 3,4,5');return '<div style="margin:8px 0;padding-top:6px;border-top:1px solid #333"><b>'+p+'</b> <span class="status '+(w.state||'down')+'">'+stateIcon(w)+' '+(w.status_text||'Down')+'</span> <span class="muted">• '+mapping+'</span><br><span class="muted">'+model+' • '+speed+' • '+ctx+' • up '+up+'</span><br><button onclick="workerAction(\'start\','+p+')">Start</button> <button onclick="workerAction(\'stop\','+p+')">Stop</button> <button onclick="workerAction(\'restart\','+p+')">Restart</button></div>'}).join('');
+ gpus.innerHTML=s.gpu.devices.map(g=>`<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct==null?'N/A':g.fan_pct+'%'}</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div></div></div>`).join('');
  }catch(e){stamp.textContent='ERROR: '+e.message}
 }
 async function saveSample(){const v=parseFloat(v12.value);if(!Number.isFinite(v))return;saved.textContent='saving...';const r=await fetch('/api/psu-sample',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voltage_12v:v,note:note.value})});const x=await r.json();saved.textContent=r.ok?'saved: '+x.sample.gpu_power_total_w+' W @ '+x.sample.voltage_12v+' V':'error: '+JSON.stringify(x)}
