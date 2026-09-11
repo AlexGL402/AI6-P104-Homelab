@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ACTION="${1:-}"
+
+case "$ACTION" in
+  reboot)
+    logger -t ai6-hostctl "Reboot requested from AI6 monitor"
+    exec /usr/bin/systemctl --no-block reboot
+    ;;
+  poweroff)
+    logger -t ai6-hostctl "Power off requested from AI6 monitor"
+    exec /usr/bin/systemctl --no-block poweroff
+    ;;
+  *)
+    echo "Usage: $0 {reboot|poweroff}" >&2
+    exit 2
+    ;;
+esac
