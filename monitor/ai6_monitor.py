@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 APP_TITLE = "AI6 Host Monitor"
 CSV_PATH = Path(os.environ.get("AI6_MONITOR_CSV", "/var/lib/ai6-monitor/psu-test.csv"))
 
-app = FastAPI(title=APP_TITLE, version="1.3.0")
+app = FastAPI(title=APP_TITLE, version="1.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -343,22 +343,39 @@ DASHBOARD = r'''<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI6 Host Monitor</title>
 <style>
-body{font-family:system-ui,Arial,sans-serif;margin:20px;background:#111;color:#eee}h1{margin:0 0 6px}.muted{color:#aaa}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px}.card{background:#1b1b1b;border:1px solid #333;border-radius:12px;padding:14px}.big{font-size:28px;font-weight:700}.gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid #333;padding:9px 0}.gpu:first-child{border-top:0}.ok{color:#7be495}.warn{color:#ffd166}.bad{color:#ff6b6b}.status{font-weight:700}.ready{color:#7be495}.loading,.starting{color:#ffd166}.down,.error{color:#ff6b6b}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:#eee}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}.workers-card{min-width:340px}.worker-summary{font-size:20px;font-weight:700;margin:3px 0}.worker-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:7px;margin-top:9px}.worker-mini{background:#161616;border:1px solid #333;border-radius:9px;padding:8px;min-width:0}.worker-head{display:flex;align-items:center;justify-content:space-between;gap:7px;font-size:12px}.worker-port{font-weight:800}.worker-model{font-size:12px;font-weight:700;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.worker-meta{font-size:11px;color:#aaa;line-height:1.35;margin-top:3px}.worker-actions{display:flex;gap:4px;margin-top:6px}.worker-actions button{padding:4px 6px;font-size:11px}.profile-actions{display:flex;gap:5px;margin-top:8px}.profile-actions button{padding:5px 8px;font-size:11px}.testrow{margin-top:8px;padding:8px;background:#161616;border:1px dashed #555;border-radius:9px}.testrow .worker-model{color:#ddd}
+:root{--bg:#111;--panel:#1b1b1b;--panel2:#161616;--border:#333;--text:#eee;--muted:#aaa;--ok:#7be495;--warn:#ffd166;--bad:#ff6b6b}
+*{box-sizing:border-box}body{font-family:system-ui,Arial,sans-serif;margin:20px;background:var(--bg);color:var(--text)}h1{margin:0 0 6px}h2,h3{margin:0}.muted{color:var(--muted)}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px;margin-top:16px;align-items:stretch}.summary-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;min-height:92px;display:flex;flex-direction:column;justify-content:flex-start}.summary-card .label{font-size:13px}.big{font-size:28px;font-weight:700;line-height:1.15;margin-top:4px}.summary-sub{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.3}
+.section{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}.section-title{font-size:17px;font-weight:750}.section-sub{font-size:12px;color:var(--muted);margin-top:2px}.profile-actions{display:flex;gap:6px}.profile-actions button{padding:6px 10px;font-size:12px}
+.worker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;align-items:stretch}.worker-card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:11px;min-height:158px;display:flex;flex-direction:column}.worker-card.test{border-style:dashed}.worker-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.worker-port{font-weight:800;font-size:14px}.status{font-weight:700;font-size:12px}.ready{color:var(--ok)}.loading,.starting{color:var(--warn)}.down,.error{color:var(--bad)}.worker-model{font-size:13px;font-weight:750;margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.worker-meta{font-size:12px;color:var(--muted);line-height:1.45;margin-top:5px}.worker-stats{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px;font-size:11px}.worker-stat{background:#202020;border:1px solid #2d2d2d;border-radius:7px;padding:5px 7px}.worker-stat b{display:block;color:#ddd;font-size:12px}.worker-actions{display:flex;gap:5px;margin-top:auto;padding-top:10px}.worker-actions button{padding:5px 8px;font-size:11px}.test-note{margin-top:auto;padding-top:10px;font-size:11px;color:var(--muted)}
+.gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid var(--border);padding:9px 0}.gpu:first-child{border-top:0}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:var(--text)}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}
+@media(max-width:700px){body{margin:10px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.summary-card{min-height:88px;padding:11px}.big{font-size:24px}.worker-grid{grid-template-columns:1fr}}
 </style></head><body>
 <h1>AI6 Host Monitor</h1><div class="muted" id="stamp">loading...</div>
-<div class="grid">
- <div class="card"><div>CPU</div><div class="big" id="cpu">-</div><div id="cpu2" class="muted"></div></div>
- <div class="card"><div>RAM</div><div class="big" id="ram">-</div><div id="ram2" class="muted"></div></div>
- <div class="card"><div>GPU total power</div><div class="big" id="power">-</div><div id="gputemp" class="muted"></div></div>
- <div class="card"><div>Disk /</div><div class="big" id="disk">-</div><div id="disk2" class="muted"></div></div>
- <div class="card"><div>Network</div><div class="big" id="net">-</div><div id="net2" class="muted"></div></div>
- <div class="card"><div>System</div><div class="big" id="uptime">-</div><div id="system2" class="muted"></div></div>
- <div class="card"><div>GPU VRAM</div><div class="big" id="vramtotal">-</div><div id="vramtotal2" class="muted"></div></div>
- <div class="card workers-card"><div>LLM workers</div><div class="worker-summary" id="workers">-</div><div id="profile" class="muted">profile -</div><div id="workerbuttons" class="worker-list"></div><div id="testworker"></div><div class="profile-actions"><button onclick="setProfile('33')">3+3</button><button onclick="setProfile('222')">2+2+2</button></div><div id="workermsg" class="muted" style="margin-top:6px;font-size:11px"></div></div>
+
+<div class="summary-grid">
+ <div class="summary-card"><div class="label">CPU</div><div class="big" id="cpu">-</div><div id="cpu2" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">RAM</div><div class="big" id="ram">-</div><div id="ram2" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">GPU total power</div><div class="big" id="power">-</div><div id="gputemp" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">Disk /</div><div class="big" id="disk">-</div><div id="disk2" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">Network</div><div class="big" id="net">-</div><div id="net2" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">System</div><div class="big" id="uptime">-</div><div id="system2" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">GPU VRAM</div><div class="big" id="vramtotal">-</div><div id="vramtotal2" class="summary-sub"></div></div>
+ <div class="summary-card"><div class="label">LLM</div><div class="big" id="workers">-</div><div id="profile" class="summary-sub">profile -</div></div>
 </div>
-<div class="grid"><div class="card" style="grid-column:1/-1"><h3>GPUs</h3><div id="gpus"></div></div></div>
-<div class="grid"><div class="card"><h3>PSU 12V sample</h3><p class="muted">Enter the multimeter reading. The current GPU power and temperatures will be logged to CSV on the host.</p><input id="v12" type="number" step="0.01" placeholder="12.05"><input id="note" placeholder="note, e.g. 400W"><button onclick="saveSample()">Save sample</button><div id="saved" class="muted"></div></div></div>
-<div class="grid"><div class="card" style="grid-column:1/-1"><h3>Web Terminal</h3><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div></div>
+
+<div class="section">
+ <div class="section-head">
+  <div><div class="section-title">LLM Workers</div><div class="section-sub">Model, GPU assignment, readiness and last measured throughput</div></div>
+  <div class="profile-actions"><button onclick="setProfile('33')">3+3</button><button onclick="setProfile('222')">2+2+2</button></div>
+ </div>
+ <div id="workerbuttons" class="worker-grid"></div>
+ <div id="workermsg" class="muted" style="margin-top:8px;font-size:11px"></div>
+</div>
+
+<div class="section"><div class="section-head"><div><div class="section-title">GPUs</div><div class="section-sub">Live load, temperature, power, VRAM and fan telemetry</div></div></div><div id="gpus"></div></div>
+<div class="section"><div class="section-title">PSU 12V sample</div><p class="muted">Enter the multimeter reading. The current GPU power and temperatures will be logged to CSV on the host.</p><input id="v12" type="number" step="0.01" placeholder="12.05"><input id="note" placeholder="note, e.g. 400W"><button onclick="saveSample()">Save sample</button><div id="saved" class="muted"></div></div>
+<div class="section"><div class="section-title">Web Terminal</div><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div>
 <script>
 const mib=(v)=>v==null?'?':(v/1024).toFixed(2)+' GiB';
 const gib=(v)=>v==null?'?':(v/1073741824).toFixed(2)+' GiB';
@@ -367,6 +384,17 @@ const fmtUptime=(s)=>{s=Math.max(0,Math.floor(s||0));const d=Math.floor(s/86400)
 const stateIcon=(w)=>w.state==='ready'?'✅':(w.state==='loading'||w.state==='starting')?'⏳':'❌';
 const profileModel=(profile)=>profile==='222'?'Qwen3 14B Q4_K_M':'Qwen3-Coder 30B Q4_K_M';
 let prevNet=null,prevNetTs=null;
+
+function regularWorkerCard(p,w,profile){
+ const mapping=profile==='222'?(p===8081?'GPU 0+1':p===8082?'GPU 2+3':'GPU 4+5'):(p===8081?'GPU 0+1+2':'GPU 3+4+5');
+ const fallbackModel=profileModel(profile);const model=w.model||fallbackModel;const gen=w.last_tok_s!=null?w.last_tok_s.toFixed(2):'—';const prompt=w.last_prompt_tok_s!=null?w.last_prompt_tok_s.toFixed(1):'—';const ctx=w.last_prompt_tokens!=null?w.last_prompt_tokens:'—';const up=w.uptime_s!=null?fmtUptime(w.uptime_s):'—';
+ return '<div class="worker-card"><div class="worker-head"><span class="worker-port">'+p+'</span><span class="status '+(w.state||'down')+'">'+stateIcon(w)+' '+(w.status_text||'Down')+'</span></div><div class="worker-model" title="'+model+'">'+model+'</div><div class="worker-meta">'+mapping+'</div><div class="worker-stats"><div class="worker-stat">Gen<b>'+gen+' tok/s</b></div><div class="worker-stat">Prompt<b>'+prompt+' tok/s</b></div><div class="worker-stat">Prompt size<b>'+ctx+'</b></div><div class="worker-stat">Uptime<b>'+up+'</b></div></div><div class="worker-actions"><button onclick="workerAction(\'start\','+p+')">Start</button><button onclick="workerAction(\'stop\','+p+')">Stop</button><button onclick="workerAction(\'restart\','+p+')">Restart</button></div></div>';
+}
+function testWorkerCard(w){
+ const model=w.model||((w.state==='loading')?'Loading model…':'Qwen2.5-Coder 32B test');const gen=w.last_tok_s!=null?w.last_tok_s.toFixed(2):'—';
+ return '<div class="worker-card test"><div class="worker-head"><span class="worker-port">TEST 8092</span><span class="status '+(w.state||'down')+'">'+stateIcon(w)+' '+(w.status_text||'Down')+'</span></div><div class="worker-model" title="'+model+'">'+model+'</div><div class="worker-meta">Manual benchmark server • GPU selection is set at launch</div><div class="worker-stats"><div class="worker-stat">Gen<b>'+gen+' tok/s</b></div><div class="worker-stat">Mode<b>manual</b></div></div><div class="test-note">Start/stop is controlled from the terminal.</div></div>';
+}
+
 async function refresh(){
  try{const r=await fetch('/api/stats');const s=await r.json();if(!r.ok)throw new Error(JSON.stringify(s));
  stamp.textContent=s.host.hostname+' • '+new Date(s.timestamp).toLocaleString();
@@ -378,11 +406,10 @@ async function refresh(){
  vramtotal.textContent=mib(s.gpu.memory_used_total_mib);vramtotal2.textContent='used / '+mib(s.gpu.memory_total_mib)+' total • '+s.gpu.count+' GPUs';
  const now=Date.now()/1000;if(prevNet&&prevNetTs){const dt=Math.max(.1,now-prevNetTs);const rx=(s.network.bytes_recv-prevNet.rx)*8/dt/1e6;const tx=(s.network.bytes_sent-prevNet.tx)*8/dt/1e6;net.textContent='↓ '+rx.toFixed(2)+' Mbps';net2.textContent='↑ '+tx.toFixed(2)+' Mbps • total ↓ '+gib(s.network.bytes_recv)+' ↑ '+gib(s.network.bytes_sent)}else{net.textContent='warming…';net2.textContent='total ↓ '+gib(s.network.bytes_recv)+' ↑ '+gib(s.network.bytes_sent)}prevNet={rx:s.network.bytes_recv,tx:s.network.bytes_sent};prevNetTs=now;
  const ports=s.llama.profile==='222'?[8081,8082,8083]:[8081,8082];const ws=s.llama.workers||{};
- const readyCount=ports.filter(p=>(ws[String(p)]||{}).state==='ready').length;const loadingCount=ports.filter(p=>['loading','starting'].includes((ws[String(p)]||{}).state)).length;
- workers.innerHTML='✅ '+readyCount+' &nbsp; ⏳ '+loadingCount+' &nbsp; ❌ '+(ports.length-readyCount-loadingCount);
- profile.textContent='profile '+(s.llama.profile==='222'?'2+2+2':'3+3')+' • '+profileModel(s.llama.profile);
- workerbuttons.innerHTML=ports.map(p=>{const w=ws[String(p)]||{};const mapping=s.llama.profile==='222'?(p===8081?'GPU 0+1':p===8082?'GPU 2+3':'GPU 4+5'):(p===8081?'GPU 0+1+2':'GPU 3+4+5');const liveAlias=w.model&&w.model!==profileModel(s.llama.profile)?' • '+w.model:'';const speed=w.last_tok_s!=null?w.last_tok_s.toFixed(2)+' tok/s':'—';const prompt=w.last_prompt_tok_s!=null?w.last_prompt_tok_s.toFixed(1)+' p/s':'—';const up=w.uptime_s!=null?fmtUptime(w.uptime_s):'—';return '<div class="worker-mini"><div class="worker-head"><span class="worker-port">'+p+'</span><span class="status '+(w.state||'down')+'">'+stateIcon(w)+' '+(w.status_text||'Down')+'</span></div><div class="worker-model" title="'+profileModel(s.llama.profile)+'">'+profileModel(s.llama.profile)+'</div><div class="worker-meta">'+mapping+liveAlias+'<br>gen '+speed+' • prompt '+prompt+'<br>up '+up+'</div><div class="worker-actions"><button onclick="workerAction(\'start\','+p+')">Start</button><button onclick="workerAction(\'stop\','+p+')">Stop</button><button onclick="workerAction(\'restart\','+p+')">Restart</button></div></div>'}).join('');
- const tw=ws['8092']||{};const tmodel=tw.model||((tw.state==='loading')?'Loading model…':'Qwen2.5-Coder 32B test');testworker.innerHTML='<div class="testrow"><div class="worker-head"><span class="worker-port">TEST 8092</span><span class="status '+(tw.state||'down')+'">'+stateIcon(tw)+' '+(tw.status_text||'Down')+'</span></div><div class="worker-model" title="'+tmodel+'">'+tmodel+'</div><div class="worker-meta">GPU 0+1+2 • manual benchmark'+(tw.last_tok_s!=null?' • '+tw.last_tok_s.toFixed(2)+' tok/s':'')+'</div></div>';
+ const readyCount=ports.filter(p=>(ws[String(p)]||{}).state==='ready').length;const loadingCount=ports.filter(p=>['loading','starting'].includes((ws[String(p)]||{}).state)).length;const downCount=ports.length-readyCount-loadingCount;const tw=ws['8092']||{};
+ workers.innerHTML='<span class="ready">'+readyCount+'</span>/<span class="loading">'+loadingCount+'</span>/<span class="down">'+downCount+'</span>';
+ profile.innerHTML=(s.llama.profile==='222'?'2+2+2':'3+3')+' • '+profileModel(s.llama.profile)+(tw.state==='ready'?' • TEST ready':tw.state==='loading'?' • TEST loading':'');
+ workerbuttons.innerHTML=ports.map(p=>regularWorkerCard(p,ws[String(p)]||{},s.llama.profile)).join('')+testWorkerCard(tw);
  gpus.innerHTML=s.gpu.devices.map(g=>`<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct==null?'N/A':g.fan_pct+'%'}</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div></div></div>`).join('');
  }catch(e){stamp.textContent='ERROR: '+e.message}
 }
