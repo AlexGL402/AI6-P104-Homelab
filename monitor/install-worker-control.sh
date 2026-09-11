@@ -12,11 +12,14 @@ GROUP_NAME="$(id -gn)"
 LLAMA_BIN="${LLAMA_BIN:-$HOME/llama.cpp/build/bin/llama-server}"
 ENV_FILE=/etc/ai6-worker-profiles.env
 HELPER=/usr/local/sbin/ai6-workerctl
+HOST_HELPER=/usr/local/sbin/ai6-hostctl
 SUDOERS=/etc/sudoers.d/ai6-monitor-workerctl
+HOST_SUDOERS=/etc/sudoers.d/ai6-monitor-hostctl
 
 [[ -x "$LLAMA_BIN" ]] || { echo "FAIL: llama-server not found: $LLAMA_BIN"; exit 1; }
 
 sudo install -m 0755 "$ROOT_DIR/monitor/ai6-workerctl" "$HELPER"
+sudo install -m 0755 "$ROOT_DIR/monitor/ai6-hostctl" "$HOST_HELPER"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   sudo install -m 0644 "$ROOT_DIR/configs/ai6-worker-profiles.env.example" "$ENV_FILE"
@@ -57,11 +60,15 @@ printf '%s ALL=(root) NOPASSWD: %s *\n' "$USER_NAME" "$HELPER" | sudo tee "$SUDO
 sudo chmod 0440 "$SUDOERS"
 sudo visudo -cf "$SUDOERS" >/dev/null
 
+printf '%s ALL=(root) NOPASSWD: %s reboot, %s poweroff\n' "$USER_NAME" "$HOST_HELPER" "$HOST_HELPER" | sudo tee "$HOST_SUDOERS" >/dev/null
+sudo chmod 0440 "$HOST_SUDOERS"
+sudo visudo -cf "$HOST_SUDOERS" >/dev/null
+
 sudo systemctl daemon-reload
 sudo systemctl disable llama2-8081 llama2-8082 llama2-8083 >/dev/null 2>&1 || true
 
 echo
-echo "PASS: worker control installed"
+echo "PASS: worker + host control installed"
 echo "Current 3+3 profile remains active."
 echo "2+2+2 profile units are installed but NOT started."
 echo
@@ -69,7 +76,9 @@ echo "To enable 2+2+2 later:"
 echo "  sudo nano $ENV_FILE"
 echo "Set MODEL_2GPU to a smaller GGUF that fits in 2x8 GB."
 echo
-echo "Control helper:"
+echo "Control helpers:"
 echo "  sudo $HELPER status"
 echo "  sudo $HELPER profile 33"
 echo "  sudo $HELPER profile 222"
+echo "  sudo $HOST_HELPER reboot"
+echo "  sudo $HOST_HELPER poweroff"
