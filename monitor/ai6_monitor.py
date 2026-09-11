@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 APP_TITLE = "AI6 Host Monitor"
 CSV_PATH = Path(os.environ.get("AI6_MONITOR_CSV", "/var/lib/ai6-monitor/psu-test.csv"))
 
-app = FastAPI(title=APP_TITLE, version="1.4.0")
+app = FastAPI(title=APP_TITLE, version="1.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -126,6 +126,16 @@ def run_workerctl(*args):
     )
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout or "workerctl failed").strip())
+    return (p.stdout or "").strip()
+
+
+def run_hostctl(action: str):
+    p = subprocess.run(
+        ["sudo", "/usr/local/sbin/ai6-hostctl", action],
+        capture_output=True, text=True, timeout=5,
+    )
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout or "hostctl failed").strip())
     return (p.stdout or "").strip()
 
 
@@ -284,6 +294,11 @@ class WorkerCommand(BaseModel):
     profile: str | None = None
 
 
+class HostCommand(BaseModel):
+    action: str
+    confirm: str
+
+
 @app.get("/api/stats")
 def api_stats():
     try:
@@ -333,6 +348,24 @@ def worker_action(cmd: WorkerCommand):
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.post("/api/host/action")
+def host_action(cmd: HostCommand):
+    expected = {
+        "reboot": "REBOOT AI6",
+        "poweroff": "POWER OFF AI6",
+    }
+    phrase = expected.get(cmd.action)
+    if phrase is None:
+        raise HTTPException(status_code=400, detail="invalid host action")
+    if cmd.confirm != phrase:
+        raise HTTPException(status_code=400, detail="confirmation phrase mismatch")
+    try:
+        run_hostctl(cmd.action)
+        return {"ok": True, "action": cmd.action}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -349,6 +382,7 @@ DASHBOARD = r'''<!doctype html>
 .section{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}.section-title{font-size:17px;font-weight:750}.section-sub{font-size:12px;color:var(--muted);margin-top:2px}.profile-actions{display:flex;gap:6px}.profile-actions button{padding:6px 10px;font-size:12px}
 .worker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;align-items:stretch}.worker-card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:11px;min-height:158px;display:flex;flex-direction:column}.worker-card.test{border-style:dashed}.worker-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.worker-port{font-weight:800;font-size:14px}.status{font-weight:700;font-size:12px}.ready{color:var(--ok)}.loading,.starting{color:var(--warn)}.down,.error{color:var(--bad)}.worker-model{font-size:13px;font-weight:750;margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.worker-meta{font-size:12px;color:var(--muted);line-height:1.45;margin-top:5px}.worker-stats{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px;font-size:11px}.worker-stat{background:#202020;border:1px solid #2d2d2d;border-radius:7px;padding:5px 7px}.worker-stat b{display:block;color:#ddd;font-size:12px}.worker-actions{display:flex;gap:5px;margin-top:auto;padding-top:10px}.worker-actions button{padding:5px 8px;font-size:11px}.test-note{margin-top:auto;padding-top:10px;font-size:11px;color:var(--muted)}
 .gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid var(--border);padding:9px 0}.gpu:first-child{border-top:0}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:var(--text)}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}
+.host-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}.host-controls .host-label{font-weight:750;margin-right:4px}.host-btn{padding:7px 11px}.host-btn.reboot{border-color:#8a6d2c}.host-btn.poweroff{border-color:#8a3535;color:#ffb0b0}.host-hint{font-size:11px;color:var(--muted)}
 @media(max-width:700px){body{margin:10px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.summary-card{min-height:88px;padding:11px}.big{font-size:24px}.worker-grid{grid-template-columns:1fr}}
 </style></head><body>
 <h1>AI6 Host Monitor</h1><div class="muted" id="stamp">loading...</div>
@@ -375,7 +409,7 @@ DASHBOARD = r'''<!doctype html>
 
 <div class="section"><div class="section-head"><div><div class="section-title">GPUs</div><div class="section-sub">Live load, temperature, power, VRAM and fan telemetry</div></div></div><div id="gpus"></div></div>
 <div class="section"><div class="section-title">PSU 12V sample</div><p class="muted">Enter the multimeter reading. The current GPU power and temperatures will be logged to CSV on the host.</p><input id="v12" type="number" step="0.01" placeholder="12.05"><input id="note" placeholder="note, e.g. 400W"><button onclick="saveSample()">Save sample</button><div id="saved" class="muted"></div></div>
-<div class="section"><div class="section-title">Web Terminal</div><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div>
+<div class="section"><div class="section-title">Web Terminal</div><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div class="host-controls"><span class="host-label">Host controls</span><button class="host-btn reboot" onclick="hostAction('reboot')">↻ Reboot server</button><button class="host-btn poweroff" onclick="hostAction('poweroff')">⏻ Power off server</button><span class="host-hint">Typed confirmation is required.</span></div><div id="hostmsg" class="muted" style="margin-top:8px"></div><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div>
 <script>
 const mib=(v)=>v==null?'?':(v/1024).toFixed(2)+' GiB';
 const gib=(v)=>v==null?'?':(v/1073741824).toFixed(2)+' GiB';
@@ -416,6 +450,7 @@ async function refresh(){
 async function saveSample(){const v=parseFloat(v12.value);if(!Number.isFinite(v))return;saved.textContent='saving...';const r=await fetch('/api/psu-sample',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voltage_12v:v,note:note.value})});const x=await r.json();saved.textContent=r.ok?'saved: '+x.sample.gpu_power_total_w+' W @ '+x.sample.voltage_12v+' V':'error: '+JSON.stringify(x)}
 async function workerAction(action,port){workermsg.textContent=action+' '+port+'...';const r=await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,port})});const x=await r.json();workermsg.textContent=r.ok?'OK: '+action+' '+port:'ERROR: '+(x.detail||JSON.stringify(x));setTimeout(refresh,800)}
 async function setProfile(p){workermsg.textContent='switching profile '+p+'...';const r=await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'profile',profile:p})});const x=await r.json();workermsg.textContent=r.ok?'OK: profile '+p:'ERROR: '+(x.detail||JSON.stringify(x));setTimeout(refresh,1200)}
+async function hostAction(action){const phrase=action==='reboot'?'REBOOT AI6':'POWER OFF AI6';const label=action==='reboot'?'reboot':'power off';const typed=window.prompt('Type '+phrase+' to '+label+' the whole AI6 server:');if(typed===null)return;if(typed!==phrase){hostmsg.textContent='Cancelled: confirmation text did not match.';return}hostmsg.textContent='Sending '+label+' command…';try{const r=await fetch('/api/host/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,confirm:typed})});const x=await r.json();if(!r.ok){hostmsg.textContent='ERROR: '+(x.detail||JSON.stringify(x));return}hostmsg.textContent=action==='reboot'?'Reboot requested. This page will disconnect and return after boot.':'Power off requested. The server will go offline.'}catch(e){hostmsg.textContent=label+' requested; connection closed.'}}
 function terminalUrl(){return location.protocol+'//'+location.hostname+':8091/'}
 function openTerminal(){window.open(terminalUrl(),'_blank','noopener')}
 function toggleTerminal(){const w=document.getElementById('termwrap'),f=document.getElementById('termframe');if(w.style.display==='none'){if(!f.src)f.src=terminalUrl();w.style.display='block'}else{w.style.display='none'}}
