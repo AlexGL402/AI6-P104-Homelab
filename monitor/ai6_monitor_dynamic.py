@@ -3,6 +3,15 @@
 
 Keeps the existing dashboard/API/host controls, but replaces the hard-coded
 LLM worker list with live discovery of local llama-server processes.
+
+Discovery pipeline (see README_RU.md for user-facing details):
+1. Scan all host processes; a process counts as a worker if its name or
+   command line contains `llama-server`.
+2. Parse CLI args (`--port`, `--model`, `--alias`, `--ctx-size`, both
+   `--flag value` and `--flag=value` forms). No port -> process skipped.
+3. Enrich each worker: health state, live model id, GPU assignment from
+   process env, PID/uptime, and last gen/prompt tok/s parsed from the
+   journal (managed) or the process stdout file (manual).
 """
 
 import json
@@ -20,36 +29,57 @@ import ai6_monitor as base
 
 _ORIGINAL_COLLECT_STATS = base.collect_stats
 
+# Journal/log tail length used when extracting the last measured tok/s.
+_LOG_TAIL_LINES = 160
 
-def _arg_value(cmdline, *names):
+# Timeout (seconds) for external commands used while enriching a worker.
+_SUBPROCESS_TIMEOUT = 1.5
+
+# /v1/models is only polled for ready workers; keep the probe short.
+_MODELS_TIMEOUT = 0.7
+
+# Arguments we understand when parsing a llama-server command line.
+_CLI_OPTIONS = {
+    "--port": "port",
+    "-p": "port",
+    "--ctx-size": "ctx",
+    "-c": "ctx",
+    "--alias": "alias",
+    "--model": "model",
+    "-m": "model",
+}
+
+
+def _cli_options(cmdline):
+    """Parse a llama-server argv into {option: value}, handling both
+    `--flag value` and `--flag=value` forms."""
+    cmdline = tuple(cmdline)
+    options = {}
     for i, arg in enumerate(cmdline):
-        for name in names:
-            if arg == name and i + 1 < len(cmdline):
-                return cmdline[i + 1]
-            prefix = name + "="
+        key = _CLI_OPTIONS.get(arg)
+        if key is not None and i + 1 < len(cmdline):
+            options.setdefault(key, cmdline[i + 1])
+        for flag, key in _CLI_OPTIONS.items():
+            prefix = flag + "="
             if arg.startswith(prefix):
-                return arg[len(prefix):]
-    return None
+                options.setdefault(key, arg[len(prefix):])
+    return options
 
 
-def _parse_port(cmdline):
-    value = _arg_value(cmdline, "--port", "-p")
+def _parse_int(value, lo=None, hi=None):
     try:
-        port = int(value)
-        return port if 1 <= port <= 65535 else None
+        number = int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _parse_ctx(cmdline):
-    value = _arg_value(cmdline, "--ctx-size", "-c")
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    if lo is not None and number < lo:
         return None
+    if hi is not None and number > hi:
+        return None
+    return number
 
 
 def _process_environment(proc):
+    """Best-effort read of a process environment (may be denied for other users)."""
     try:
         return proc.environ()
     except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
@@ -62,7 +92,7 @@ def _gpu_assignment(proc):
     if not raw or raw.lower() in ("all", "void", "none"):
         return [], "GPU auto/all"
     devices = [x.strip() for x in raw.split(",") if x.strip()]
-    return devices, "GPU " + "+".join(devices) if devices else "GPU auto/all"
+    return devices, ("GPU " + "+".join(devices)) if devices else "GPU auto/all"
 
 
 def _stdout_log_path(pid):
@@ -75,13 +105,13 @@ def _stdout_log_path(pid):
     return None
 
 
-def _tail_text(path, lines=160):
+def _tail_text(path, lines=_LOG_TAIL_LINES):
     if not path:
         return ""
     try:
         p = subprocess.run(
             ["tail", "-n", str(lines), path], capture_output=True, text=True,
-            timeout=1.5,
+            timeout=_SUBPROCESS_TIMEOUT,
         )
         return p.stdout or ""
     except Exception:
@@ -106,16 +136,20 @@ def _extract_timings(text):
     return gen, prompt, prompt_tokens
 
 
+def _is_llama_server(proc):
+    info = proc.info or {}
+    name = info.get("name") or ""
+    joined = " ".join(info.get("cmdline") or [])
+    return "llama-server" in name or "llama-server" in joined
+
+
 def _worker_processes():
     found = {}
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
-            cmd = proc.info.get("cmdline") or []
-            name = proc.info.get("name") or ""
-            joined = " ".join(cmd)
-            if "llama-server" not in name and "llama-server" not in joined:
+            if not _is_llama_server(proc):
                 continue
-            port = _parse_port(cmd)
+            port = _parse_int(_cli_options(proc.info.get("cmdline") or []).get("port"), 1, 65535)
             if port is None:
                 continue
             found[port] = proc
@@ -127,10 +161,10 @@ def _worker_processes():
 def _dynamic_worker_details(port, proc):
     active = base.service_ok(port)
     state, status_text = base._health_state(port, active)
-    cmd = proc.info.get("cmdline") or []
-    alias = _arg_value(cmd, "--alias")
-    model_path = _arg_value(cmd, "--model", "-m")
-    ctx = _parse_ctx(cmd)
+    options = _cli_options(proc.info.get("cmdline") or [])
+    alias = options.get("alias")
+    model_path = options.get("model")
+    ctx = _parse_int(options.get("ctx"))
     gpu_devices, gpu_label = _gpu_assignment(proc)
     service = base._service_for_port(port)
 
@@ -155,21 +189,16 @@ def _dynamic_worker_details(port, proc):
     }
 
     if state == "ready":
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=0.7) as r:
-                data = json.load(r)
-            models = data.get("data") or []
-            if models and models[0].get("id"):
-                info["model"] = models[0]["id"]
-        except Exception:
-            pass
+        live_id = _live_model_id(port)
+        if live_id:
+            info["model"] = live_id
 
     text = ""
     if service:
         try:
             p = subprocess.run(
-                ["journalctl", "-u", service, "-n", "160", "--no-pager", "-o", "cat"],
-                capture_output=True, text=True, timeout=1.5,
+                ["journalctl", "-u", service, "-n", str(_LOG_TAIL_LINES), "--no-pager", "-o", "cat"],
+                capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT,
             )
             text = p.stdout or ""
         except Exception:
@@ -183,6 +212,19 @@ def _dynamic_worker_details(port, proc):
     info["last_prompt_tok_s"] = prompt
     info["last_prompt_tokens"] = prompt_tokens
     return info
+
+
+def _live_model_id(port):
+    """Return the live model id from /v1/models, or None if unavailable."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=_MODELS_TIMEOUT) as r:
+            data = json.load(r)
+        models = data.get("data") or []
+        if models and models[0].get("id"):
+            return models[0]["id"]
+    except Exception:
+        pass
+    return None
 
 
 def discover_workers():
