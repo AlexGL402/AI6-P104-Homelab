@@ -1,7 +1,7 @@
 """
 title: AI6 Token Stats Event
 author: AlexGL402
-version: 0.1.0
+version: 0.2.0
 """
 
 from pydantic import BaseModel, Field
@@ -25,15 +25,38 @@ class Event:
         __app__=None,
         __request__=None,
     ):
-        # Only act after a completed chat response.
         if __event_name__ != "chat.finished":
             return
 
         if self.valves.debug:
             print("AI6 Token Stats Event:", event)
 
-        metrics = self._find_metrics_dict(event)
+        chat_id = self._find_value(event, "chat_id")
+        message_id = self._find_value(event, "message_id")
+        user_id = self._find_value(event, "user_id")
+
+        if not chat_id or not message_id:
+            if self.valves.debug:
+                print("AI6 Token Stats: missing chat_id/message_id")
+            return
+
+        # chat.finished itself only contains IDs and a short message. The actual
+        # usage/timing data is stored on the finished assistant message.
+        message = None
+        try:
+            from open_webui.models.chats import Chats
+
+            message = await Chats.get_message_by_id_and_message_id(chat_id, message_id)
+            if self.valves.debug:
+                print("AI6 Token Stats Message:", message)
+        except Exception as exc:
+            if self.valves.debug:
+                print("AI6 Token Stats message load error:", repr(exc))
+
+        metrics = self._find_metrics_dict(message or {})
         if not metrics:
+            if self.valves.debug:
+                print("AI6 Token Stats: no metrics on finished message")
             return
 
         prompt = self._num(metrics, "input_tokens", "prompt_tokens", "prompt_n")
@@ -67,24 +90,13 @@ class Event:
             return
 
         stats = " · ".join(parts)
-
-        # Try to route a status event back to the current chat/message.
-        chat_id = self._find_value(event, "chat_id") or self._find_value(event, "subject_id")
-        message_id = self._find_value(event, "message_id") or self._find_value(event, "id")
-        user_id = self._find_value(event, "user_id") or self._find_value(event, "actor_id")
-
-        if not chat_id or not message_id:
-            if self.valves.debug:
-                print("AI6 Token Stats: no chat/message id; stats:", stats)
-            return
+        if self.valves.debug:
+            print("AI6 Token Stats Final:", stats)
 
         try:
             from open_webui.socket.main import get_event_emitter
 
-            metadata = {
-                "chat_id": chat_id,
-                "message_id": message_id,
-            }
+            metadata = {"chat_id": chat_id, "message_id": message_id}
             if user_id:
                 metadata["user_id"] = user_id
 
