@@ -58,7 +58,7 @@ Group=$GROUP_NAME
 WorkingDirectory=$MON_DIR
 Environment=PYTHONUNBUFFERED=1
 Environment=AI6_MONITOR_CSV=$CSV_DIR/psu-test.csv
-ExecStart=$VENV/bin/uvicorn ai6_monitor:app --host 0.0.0.0 --port 8090
+ExecStart=$VENV/bin/uvicorn ai6_monitor_dynamic:app --host 0.0.0.0 --port 8090
 Restart=always
 RestartSec=3
 
@@ -69,6 +69,7 @@ EOF
 sudo install -m 0644 "$TMP_SERVICE" "$SERVICE_DEST"
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai6-monitor
+sudo systemctl restart ai6-monitor
 
 sleep 2
 if ! systemctl is-active --quiet ai6-monitor; then
