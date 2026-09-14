@@ -1,10 +1,9 @@
 """
 title: AI6 Token Stats
 author: AlexGL402
-version: 0.2.0
+version: 0.3.0
 """
 
-import time
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -18,14 +17,14 @@ class Filter:
     def __init__(self):
         self.valves = self.Valves()
 
-    async def inlet(self, body: dict, __metadata__: Optional[dict] = None, **kwargs) -> dict:
+    def inlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+        # Ask llama.cpp/OpenAI-compatible backends to include usage in streamed replies.
         if body.get("stream", True):
             body.setdefault("stream_options", {})["include_usage"] = True
-        if __metadata__ is not None:
-            __metadata__["ai6_stats_start"] = time.perf_counter()
         return body
 
-    async def outlet(self, body: dict, __event_emitter__=None, __metadata__: Optional[dict] = None, **kwargs) -> dict:
+    def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
+        # Open WebUI exposes llama.cpp metrics in the final response object.
         flat = self._find_metrics_dict(body)
         usage = self._find_dict(body, "usage")
         timings = self._find_dict(body, "timings")
@@ -38,9 +37,8 @@ class Filter:
 
         speed = self._pick(flat, usage, timings, keys=("predicted_per_second",))
         ms = self._pick(flat, usage, timings, keys=("predicted_ms", "eval_ms"))
-        seconds = ms / 1000.0 if ms else None
-        if seconds is None and __metadata__ and __metadata__.get("ai6_stats_start"):
-            seconds = time.perf_counter() - __metadata__["ai6_stats_start"]
+        seconds = ms / 1000.0 if ms is not None else None
+
         if speed is None and output and seconds:
             speed = output / seconds
 
@@ -52,23 +50,56 @@ class Filter:
         if total is not None:
             parts.append(f"Σ {int(total)}")
         if self.valves.show_context and total is not None and self.valves.context_window:
-            pct = total / self.valves.context_window * 100
+            pct = total / self.valves.context_window * 100.0
             parts.append(f"ctx {int(total)}/{self.valves.context_window} ({pct:.0f}%)")
         if seconds is not None:
             parts.append(f"⏱ {seconds:.2f}s")
         if speed is not None:
-            parts.append(f"⚡ {float(speed):.2f} t/s")
+            parts.append(f"⚡ {float(speed):.2f} tok/s")
 
-        if parts and __event_emitter__:
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": " · ".join(parts),
-                    "done": True,
-                    "hidden": False
-                }
-            })
+        if parts:
+            stats = " · ".join(parts)
+            self._append_to_assistant(body, stats)
+
         return body
+
+    def _append_to_assistant(self, body: dict, stats: str) -> bool:
+        suffix = f"\n\n---\n`{stats}`"
+
+        # Most Open WebUI filter responses contain messages.
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            for msg in reversed(messages):
+                if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), str):
+                    if stats not in msg["content"]:
+                        msg["content"] += suffix
+                    return True
+
+        # OpenAI-compatible response shape.
+        choices = body.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                msg = choice.get("message")
+                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                    if stats not in msg["content"]:
+                        msg["content"] += suffix
+                    return True
+
+        # Some Open WebUI builds pass the assistant message directly.
+        if body.get("role") == "assistant" and isinstance(body.get("content"), str):
+            if stats not in body["content"]:
+                body["content"] += suffix
+            return True
+
+        message = body.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            if stats not in message["content"]:
+                message["content"] += suffix
+            return True
+
+        return False
 
     def _find_metrics_dict(self, obj):
         metric_keys = {
