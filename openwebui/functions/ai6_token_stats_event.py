@@ -28,6 +28,11 @@ class Event:
         if __event_name__ != "chat.finished":
             return
 
+        if not isinstance(event, (dict, list)):
+            if self.valves.debug:
+                print("AI6 Token Stats: event payload not dict/list, skipping")
+            return
+
         if self.valves.debug:
             print("AI6 Token Stats Event:", event)
 
@@ -52,6 +57,11 @@ class Event:
         except Exception as exc:
             if self.valves.debug:
                 print("AI6 Token Stats message load error:", repr(exc))
+
+        if message is not None and not isinstance(message, (dict, list)):
+            if self.valves.debug:
+                print("AI6 Token Stats: unexpected message type", type(message).__name__)
+            return
 
         metrics = self._find_metrics_dict(message or {})
         if not metrics:
@@ -82,9 +92,16 @@ class Event:
             parts.append(f"{float(speed):.2f} t/s")
 
         # Optional context indicator for troubleshooting or long chats.
-        if self.valves.show_context and total is not None and self.valves.context_window:
-            pct = total / self.valves.context_window * 100.0
-            parts.append(f"ctx {int(total)}/{self.valves.context_window} ({pct:.0f}%)")
+        context_window = self.valves.context_window
+        if (
+            self.valves.show_context
+            and total is not None
+            and isinstance(context_window, int)
+            and not isinstance(context_window, bool)
+            and context_window > 0
+        ):
+            pct = total / context_window * 100.0
+            parts.append(f"ctx {int(total)}/{context_window} ({pct:.0f}%)")
 
         if not parts:
             return
@@ -117,7 +134,11 @@ class Event:
             if self.valves.debug:
                 print("AI6 Token Stats emitter error:", repr(exc))
 
-    def _find_metrics_dict(self, obj):
+    _MAX_SEARCH_DEPTH = 64
+
+    def _find_metrics_dict(self, obj, _depth=0):
+        if _depth > self._MAX_SEARCH_DEPTH:
+            return {}
         metric_keys = {
             "cache_n",
             "prompt_n",
@@ -137,27 +158,29 @@ class Event:
             if any(k in obj for k in metric_keys):
                 best = obj
             for child in obj.values():
-                nested = self._find_metrics_dict(child)
+                nested = self._find_metrics_dict(child, _depth + 1)
                 if sum(k in nested for k in metric_keys) > sum(k in best for k in metric_keys):
                     best = nested
         elif isinstance(obj, list):
             for child in obj:
-                nested = self._find_metrics_dict(child)
+                nested = self._find_metrics_dict(child, _depth + 1)
                 if sum(k in nested for k in metric_keys) > sum(k in best for k in metric_keys):
                     best = nested
         return best
 
-    def _find_value(self, obj, key):
+    def _find_value(self, obj, key, _depth=0):
+        if _depth > self._MAX_SEARCH_DEPTH:
+            return None
         if isinstance(obj, dict):
             if key in obj and obj[key] not in (None, ""):
                 return obj[key]
             for child in obj.values():
-                found = self._find_value(child, key)
+                found = self._find_value(child, key, _depth + 1)
                 if found not in (None, ""):
                     return found
         elif isinstance(obj, list):
             for child in obj:
-                found = self._find_value(child, key)
+                found = self._find_value(child, key, _depth + 1)
                 if found not in (None, ""):
                     return found
         return None
