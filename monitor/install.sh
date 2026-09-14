@@ -58,7 +58,7 @@ Group=$GROUP_NAME
 WorkingDirectory=$MON_DIR
 Environment=PYTHONUNBUFFERED=1
 Environment=AI6_MONITOR_CSV=$CSV_DIR/psu-test.csv
-ExecStart=$VENV/bin/uvicorn ai6_monitor_dynamic:app --host 0.0.0.0 --port 8090
+ExecStart=$VENV/bin/uvicorn ai6_monitor_auto:app --host 0.0.0.0 --port 8090
 Restart=always
 RestartSec=3
 
