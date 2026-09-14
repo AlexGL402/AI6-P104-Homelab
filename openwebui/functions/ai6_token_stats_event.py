@@ -1,7 +1,7 @@
 """
 title: AI6 Token Stats Event
 author: AlexGL402
-version: 0.2.0
+version: 0.3.0
 """
 
 from pydantic import BaseModel, Field
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class Event:
     class Valves(BaseModel):
         context_window: int = Field(default=8192)
-        show_context: bool = Field(default=True)
+        show_context: bool = Field(default=False)
         debug: bool = Field(default=False)
 
     def __init__(self):
@@ -40,8 +40,8 @@ class Event:
                 print("AI6 Token Stats: missing chat_id/message_id")
             return
 
-        # chat.finished itself only contains IDs and a short message. The actual
-        # usage/timing data is stored on the finished assistant message.
+        # chat.finished only carries IDs and summary text. Full usage/timing
+        # lives on the persisted assistant message.
         message = None
         try:
             from open_webui.models.chats import Chats
@@ -71,25 +71,25 @@ class Event:
         if speed is None and output and seconds:
             speed = output / seconds
 
+        # Compact line, matching the style of llama.cpp frontends:
+        # 42 tokens | 3.51s | 11.97 t/s
         parts = []
-        if prompt is not None:
-            parts.append(f"↑ {int(prompt)}")
         if output is not None:
-            parts.append(f"↓ {int(output)}")
-        if total is not None:
-            parts.append(f"Σ {int(total)}")
+            parts.append(f"{int(output)} tokens")
+        if seconds is not None:
+            parts.append(f"{seconds:.2f}s")
+        if speed is not None:
+            parts.append(f"{float(speed):.2f} t/s")
+
+        # Optional context indicator for troubleshooting or long chats.
         if self.valves.show_context and total is not None and self.valves.context_window:
             pct = total / self.valves.context_window * 100.0
             parts.append(f"ctx {int(total)}/{self.valves.context_window} ({pct:.0f}%)")
-        if seconds is not None:
-            parts.append(f"⏱ {seconds:.2f}s")
-        if speed is not None:
-            parts.append(f"⚡ {float(speed):.2f} tok/s")
 
         if not parts:
             return
 
-        stats = " · ".join(parts)
+        stats = " | ".join(parts)
         if self.valves.debug:
             print("AI6 Token Stats Final:", stats)
 
