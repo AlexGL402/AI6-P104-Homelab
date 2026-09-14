@@ -1,7 +1,7 @@
 """
 title: AI6 Token Stats
 author: AlexGL402
-version: 0.3.0
+version: 0.4.0
 """
 
 from typing import Optional
@@ -18,13 +18,11 @@ class Filter:
         self.valves = self.Valves()
 
     def inlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
-        # Ask llama.cpp/OpenAI-compatible backends to include usage in streamed replies.
         if body.get("stream", True):
             body.setdefault("stream_options", {})["include_usage"] = True
         return body
 
     def outlet(self, body: dict, __user__: Optional[dict] = None) -> dict:
-        # Open WebUI exposes llama.cpp metrics in the final response object.
         flat = self._find_metrics_dict(body)
         usage = self._find_dict(body, "usage")
         timings = self._find_dict(body, "timings")
@@ -38,7 +36,6 @@ class Filter:
         speed = self._pick(flat, usage, timings, keys=("predicted_per_second",))
         ms = self._pick(flat, usage, timings, keys=("predicted_ms", "eval_ms"))
         seconds = ms / 1000.0 if ms is not None else None
-
         if speed is None and output and seconds:
             speed = output / seconds
 
@@ -57,49 +54,24 @@ class Filter:
         if speed is not None:
             parts.append(f"⚡ {float(speed):.2f} tok/s")
 
-        if parts:
+        messages = body.get("messages", [])
+        if parts and isinstance(messages, list):
             stats = " · ".join(parts)
-            self._append_to_assistant(body, stats)
+            suffix = f"\n\n---\n`{stats}`"
+            for msg in reversed(messages):
+                if (
+                    isinstance(msg, dict)
+                    and msg.get("role") == "assistant"
+                    and isinstance(msg.get("content"), str)
+                ):
+                    if stats not in msg["content"]:
+                        msg["content"] += suffix
+                    break
+
+            # Match the current Open WebUI filter outlet contract exactly.
+            return {"messages": messages}
 
         return body
-
-    def _append_to_assistant(self, body: dict, stats: str) -> bool:
-        suffix = f"\n\n---\n`{stats}`"
-
-        # Most Open WebUI filter responses contain messages.
-        messages = body.get("messages")
-        if isinstance(messages, list):
-            for msg in reversed(messages):
-                if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), str):
-                    if stats not in msg["content"]:
-                        msg["content"] += suffix
-                    return True
-
-        # OpenAI-compatible response shape.
-        choices = body.get("choices")
-        if isinstance(choices, list):
-            for choice in choices:
-                if not isinstance(choice, dict):
-                    continue
-                msg = choice.get("message")
-                if isinstance(msg, dict) and isinstance(msg.get("content"), str):
-                    if stats not in msg["content"]:
-                        msg["content"] += suffix
-                    return True
-
-        # Some Open WebUI builds pass the assistant message directly.
-        if body.get("role") == "assistant" and isinstance(body.get("content"), str):
-            if stats not in body["content"]:
-                body["content"] += suffix
-            return True
-
-        message = body.get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            if stats not in message["content"]:
-                message["content"] += suffix
-            return True
-
-        return False
 
     def _find_metrics_dict(self, obj):
         metric_keys = {
