@@ -1,7 +1,7 @@
 """
 title: AI6 Token Stats
 author: AlexGL402
-version: 0.1.0
+version: 0.2.0
 """
 
 import time
@@ -13,7 +13,7 @@ class Filter:
     class Valves(BaseModel):
         priority: int = Field(default=0)
         context_window: int = Field(default=8192)
-        show_context: bool = Field(default=False)
+        show_context: bool = Field(default=True)
 
     def __init__(self):
         self.valves = self.Valves()
@@ -26,28 +26,21 @@ class Filter:
         return body
 
     async def outlet(self, body: dict, __event_emitter__=None, __metadata__: Optional[dict] = None, **kwargs) -> dict:
+        flat = self._find_metrics_dict(body)
         usage = self._find_dict(body, "usage")
         timings = self._find_dict(body, "timings")
 
-        prompt = self._num(usage, "prompt_tokens", "input_tokens")
-        output = self._num(usage, "completion_tokens", "output_tokens")
-        total = self._num(usage, "total_tokens")
-
-        if prompt is None:
-            prompt = self._num(timings, "prompt_n")
-        if output is None:
-            output = self._num(timings, "predicted_n")
+        prompt = self._pick(flat, usage, timings, keys=("input_tokens", "prompt_tokens", "prompt_n"))
+        output = self._pick(flat, usage, timings, keys=("output_tokens", "completion_tokens", "predicted_n"))
+        total = self._pick(flat, usage, timings, keys=("total_tokens",))
         if total is None and (prompt is not None or output is not None):
             total = (prompt or 0) + (output or 0)
 
-        seconds = None
-        ms = self._num(timings, "predicted_ms", "eval_ms")
-        if ms:
-            seconds = ms / 1000.0
-        elif __metadata__ and __metadata__.get("ai6_stats_start"):
+        speed = self._pick(flat, usage, timings, keys=("predicted_per_second",))
+        ms = self._pick(flat, usage, timings, keys=("predicted_ms", "eval_ms"))
+        seconds = ms / 1000.0 if ms else None
+        if seconds is None and __metadata__ and __metadata__.get("ai6_stats_start"):
             seconds = time.perf_counter() - __metadata__["ai6_stats_start"]
-
-        speed = self._num(timings, "predicted_per_second")
         if speed is None and output and seconds:
             speed = output / seconds
 
@@ -62,7 +55,7 @@ class Filter:
             pct = total / self.valves.context_window * 100
             parts.append(f"ctx {int(total)}/{self.valves.context_window} ({pct:.0f}%)")
         if seconds is not None:
-            parts.append(f"⏱ {seconds:.1f}s")
+            parts.append(f"⏱ {seconds:.2f}s")
         if speed is not None:
             parts.append(f"⚡ {float(speed):.2f} t/s")
 
@@ -72,11 +65,31 @@ class Filter:
                 "data": {
                     "description": " · ".join(parts),
                     "done": True,
-                    "hidden": False,
-                    "action": "ai6-token-stats"
+                    "hidden": False
                 }
             })
         return body
+
+    def _find_metrics_dict(self, obj):
+        metric_keys = {
+            "cache_n", "prompt_n", "prompt_ms", "prompt_per_second",
+            "predicted_n", "predicted_ms", "predicted_per_second",
+            "input_tokens", "output_tokens", "total_tokens"
+        }
+        best = {}
+        if isinstance(obj, dict):
+            if any(k in obj for k in metric_keys):
+                best = obj
+            for child in obj.values():
+                nested = self._find_metrics_dict(child)
+                if sum(k in nested for k in metric_keys) > sum(k in best for k in metric_keys):
+                    best = nested
+        elif isinstance(obj, list):
+            for child in obj:
+                nested = self._find_metrics_dict(child)
+                if sum(k in nested for k in metric_keys) > sum(k in best for k in metric_keys):
+                    best = nested
+        return best
 
     def _find_dict(self, obj, key):
         found = {}
@@ -96,11 +109,12 @@ class Filter:
         return found
 
     @staticmethod
-    def _num(source, *keys):
-        if not isinstance(source, dict):
-            return None
-        for key in keys:
-            value = source.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return value
+    def _pick(*sources, keys):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return value
         return None
