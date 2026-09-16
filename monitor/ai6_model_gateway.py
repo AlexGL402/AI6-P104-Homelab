@@ -2,27 +2,26 @@
 """OpenAI-compatible gateway for dynamically discovered AI6 llama.cpp workers.
 
 The gateway reads worker state from the AI6 monitor, groups ready workers by
-GGUF model path, exposes one stable model id per loaded GGUF, and load-balances
-requests across workers that currently host the same model.
+GGUF model path, exposes stable model ids and friendly aliases, and
+load-balances requests across ready workers that host the same model.
 
-Friendly aliases are generated dynamically from ready workers:
-- coding: prefers coder-specialized models
-- reasoning: prefers larger reasoning/general models (27B+ / Qwen3.8 class)
-- chat: prefers lighter general-chat models
-- coder-fast: any ready 2-GPU model pool
-- coder-large-context: any ready 3-GPU model pool
+Friendly aliases include:
+- coder-fast: ready workers using exactly 2 GPUs
+- coder-large-context: ready workers using exactly 3 GPUs
+- coding / reasoning / chat: role-oriented aliases chosen from loaded models
 
-Each alias is pinned to one underlying model group so a single alias never
-mixes different model weights.
+Open WebUI tool handling is conservative by default: only explicitly allowed
+web-search tools are forwarded to llama.cpp. This prevents unrelated built-in
+tools such as ask_user from hijacking plain chat responses while still allowing
+agentic web search when Open WebUI attaches search_web/fetch_url tools.
 """
 
 import asyncio
 import json
 import os
-import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -32,7 +31,16 @@ MONITOR_URL = os.environ.get("AI6_MONITOR_URL", "http://127.0.0.1:8090").rstrip(
 REQUEST_TIMEOUT = float(os.environ.get("AI6_GATEWAY_TIMEOUT", "1800"))
 PASS_TOOLS = os.environ.get("AI6_GATEWAY_PASS_TOOLS", "0").lower() in ("1", "true", "yes", "on")
 
-app = FastAPI(title="AI6 Model Gateway", version="1.3.0")
+# Default Open WebUI web-related function names. Override with a comma-separated
+# list through AI6_GATEWAY_ALLOWED_TOOLS if a future Open WebUI release renames
+# its web tools.
+_ALLOWED_TOOLS_RAW = os.environ.get(
+    "AI6_GATEWAY_ALLOWED_TOOLS",
+    "search_web,fetch_url,web_search,fetch_webpage",
+)
+ALLOWED_TOOLS = {x.strip() for x in _ALLOWED_TOOLS_RAW.split(",") if x.strip()}
+
+app = FastAPI(title="AI6 Model Gateway", version="1.4.0")
 
 _inflight: dict[int, int] = defaultdict(int)
 _rr: dict[str, int] = defaultdict(int)
@@ -59,16 +67,6 @@ def _ctx(worker: dict[str, Any]) -> int:
         return int(worker.get("ctx") or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _size_b(model_id: str) -> float:
-    m = re.search(r"(?:^|[-_ ])(\d+(?:\.\d+)?)b(?:[-_ ]|$)", model_id.lower())
-    if not m:
-        return 0.0
-    try:
-        return float(m.group(1))
-    except ValueError:
-        return 0.0
 
 
 async def _stats() -> dict[str, Any]:
@@ -116,69 +114,47 @@ def _best_group_for_gpu_count(
     return model_id, workers
 
 
-def _best_group_by_score(
-    groups: dict[str, list[dict[str, Any]]],
-    scorer: Callable[[str, list[dict[str, Any]]], float],
+def _score_role(model_id: str, role: str) -> int:
+    name = model_id.lower()
+    score = 0
+    if role == "coding":
+        if "coder" in name:
+            score += 100
+        if "qwen2.5" in name or "qwen3" in name:
+            score += 20
+        if "14b" in name or "16b" in name:
+            score += 10
+    elif role == "reasoning":
+        for token, points in (("32b", 35), ("30b", 33), ("27b", 30), ("22b", 24), ("14b", 12)):
+            if token in name:
+                score += points
+        if "coder" not in name:
+            score += 10
+    elif role == "chat":
+        if "coder" not in name:
+            score += 25
+        if "14b" in name or "9b" in name or "8b" in name:
+            score += 15
+    return score
+
+
+def _best_group_for_role(
+    groups: dict[str, list[dict[str, Any]]], role: str
 ) -> tuple[str, list[dict[str, Any]]] | None:
-    choices: list[tuple[float, int, int, str, list[dict[str, Any]]]] = []
+    choices: list[tuple[int, int, int, str, list[dict[str, Any]]]] = []
     for model_id, workers in groups.items():
-        score = float(scorer(model_id, workers))
-        if score <= 0:
+        if not workers:
             continue
+        role_score = _score_role(model_id, role)
         max_ctx = max((_ctx(w) for w in workers), default=0)
-        choices.append((score, len(workers), max_ctx, model_id, workers))
+        choices.append((role_score, len(workers), max_ctx, model_id, workers))
     if not choices:
         return None
     choices.sort(key=lambda x: (-x[0], -x[1], -x[2], x[3].lower()))
-    _, _, _, model_id, workers = choices[0]
+    score, _, _, model_id, workers = choices[0]
+    if score <= 0:
+        return None
     return model_id, workers
-
-
-def _coding_score(model_id: str, workers: list[dict[str, Any]]) -> float:
-    name = model_id.lower()
-    score = 0.0
-    if "coder" in name or "code" in name:
-        score += 100
-    if "qwen2.5-coder" in name:
-        score += 30
-    if "qwen3-coder" in name:
-        score += 35
-    score += min(_size_b(model_id), 32.0)
-    if any(_gpu_count(w) == 2 for w in workers):
-        score += 10
-    return score if ("coder" in name or "code" in name) else 0.0
-
-
-def _reasoning_score(model_id: str, workers: list[dict[str, Any]]) -> float:
-    name = model_id.lower()
-    size = _size_b(model_id)
-    score = 0.0
-    if "qwen3.8" in name:
-        score += 100
-    if "reason" in name or "think" in name:
-        score += 100
-    if size >= 27:
-        score += 70 + size
-    elif size >= 20:
-        score += 40 + size
-    return score
-
-
-def _chat_score(model_id: str, workers: list[dict[str, Any]]) -> float:
-    name = model_id.lower()
-    if "coder" in name or "code" in name:
-        return 0.0
-    size = _size_b(model_id)
-    score = 20.0
-    if 7 <= size <= 16:
-        score += 60
-    elif 0 < size <= 20:
-        score += 40
-    if "qwen3" in name:
-        score += 25
-    if any(_gpu_count(w) <= 2 for w in workers):
-        score += 10
-    return score
 
 
 def _virtual_aliases(
@@ -186,22 +162,18 @@ def _virtual_aliases(
 ) -> dict[str, tuple[str, list[dict[str, Any]]]]:
     aliases: dict[str, tuple[str, list[dict[str, Any]]]] = {}
 
-    coding = _best_group_by_score(groups, _coding_score)
-    if coding:
-        aliases["coding"] = coding
-    reasoning = _best_group_by_score(groups, _reasoning_score)
-    if reasoning:
-        aliases["reasoning"] = reasoning
-    chat = _best_group_by_score(groups, _chat_score)
-    if chat:
-        aliases["chat"] = chat
-
     fast = _best_group_for_gpu_count(groups, 2)
     if fast:
         aliases["coder-fast"] = fast
     large = _best_group_for_gpu_count(groups, 3)
     if large:
         aliases["coder-large-context"] = large
+
+    for role in ("coding", "reasoning", "chat"):
+        match = _best_group_for_role(groups, role)
+        if match:
+            aliases[role] = match
+
     return aliases
 
 
@@ -218,7 +190,6 @@ async def _pick_from_candidates(route_id: str, candidates: list[dict[str, Any]])
 
 async def _pick_worker(model_id: str) -> dict[str, Any]:
     groups = await _ready_groups()
-
     aliases = _virtual_aliases(groups)
     if model_id in aliases:
         _, candidates = aliases[model_id]
@@ -234,15 +205,54 @@ async def _pick_worker(model_id: str) -> dict[str, Any]:
             if w["port"] == wanted_port:
                 return w
 
-    candidates = groups.get(model_id) or []
-    return await _pick_from_candidates(model_id, candidates)
+    return await _pick_from_candidates(model_id, groups.get(model_id) or [])
+
+
+def _tool_name(tool: Any) -> str | None:
+    if not isinstance(tool, dict):
+        return None
+    fn = tool.get("function")
+    if isinstance(fn, dict) and fn.get("name"):
+        return str(fn["name"])
+    # Some clients may emit a flatter schema.
+    if tool.get("name"):
+        return str(tool["name"])
+    return None
 
 
 def _sanitize_openwebui_body(body: dict[str, Any]) -> dict[str, Any]:
     if PASS_TOOLS:
         return body
-    for key in ("tools", "tool_choice", "parallel_tool_calls"):
-        body.pop(key, None)
+
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        body.pop("tools", None)
+        body.pop("tool_choice", None)
+        body.pop("parallel_tool_calls", None)
+        return body
+
+    allowed = []
+    for tool in tools:
+        name = _tool_name(tool)
+        if name and name in ALLOWED_TOOLS:
+            allowed.append(tool)
+
+    if allowed:
+        body["tools"] = allowed
+        # If Open WebUI forced a now-filtered tool by name, fall back to auto.
+        choice = body.get("tool_choice")
+        if isinstance(choice, dict):
+            fn = choice.get("function") or {}
+            forced_name = fn.get("name") if isinstance(fn, dict) else None
+            if forced_name and forced_name not in ALLOWED_TOOLS:
+                body["tool_choice"] = "auto"
+        elif isinstance(choice, str) and choice not in ("auto", "none", "required"):
+            body["tool_choice"] = "auto"
+    else:
+        body.pop("tools", None)
+        body.pop("tool_choice", None)
+        body.pop("parallel_tool_calls", None)
+
     return body
 
 
@@ -256,6 +266,7 @@ async def health():
         "workers": sum(map(len, groups.values())),
         "aliases": sorted(aliases),
         "pass_tools": PASS_TOOLS,
+        "allowed_tools": sorted(ALLOWED_TOOLS),
     }
 
 
