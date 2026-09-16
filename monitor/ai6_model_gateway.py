@@ -43,7 +43,7 @@ ALLOWED_TOOLS = {x.strip() for x in _ALLOWED_TOOLS_RAW.split(",") if x.strip()}
 
 app = FastAPI(title="AI6 Model Gateway", version="1.4.0")
 
-log = logging.getLogger("ai6_model_gateway")
+log = logging.getLogger("uvicorn.error")
 
 _inflight: dict[int, int] = defaultdict(int)
 _rr: dict[str, int] = defaultdict(int)
