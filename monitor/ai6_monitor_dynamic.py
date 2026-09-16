@@ -23,22 +23,17 @@ import urllib.request
 from pathlib import Path
 
 import psutil
+from pydantic import BaseModel
 
 import ai6_monitor as base
 
 
 _ORIGINAL_COLLECT_STATS = base.collect_stats
-
-# Journal/log tail length used when extracting the last measured tok/s.
 _LOG_TAIL_LINES = 160
-
-# Timeout (seconds) for external commands used while enriching a worker.
 _SUBPROCESS_TIMEOUT = 1.5
-
-# /v1/models is only polled for ready workers; keep the probe short.
 _MODELS_TIMEOUT = 0.7
+_MODELS_DIR = Path(os.environ.get("AI6_MODELS_DIR", str(Path.home() / "models")))
 
-# Arguments we understand when parsing a llama-server command line.
 _CLI_OPTIONS = {
     "--port": "port",
     "-p": "port",
@@ -51,8 +46,6 @@ _CLI_OPTIONS = {
 
 
 def _cli_options(cmdline):
-    """Parse a llama-server argv into {option: value}, handling both
-    `--flag value` and `--flag=value` forms."""
     cmdline = tuple(cmdline)
     options = {}
     for i, arg in enumerate(cmdline):
@@ -79,7 +72,6 @@ def _parse_int(value, lo=None, hi=None):
 
 
 def _process_environment(proc):
-    """Best-effort read of a process environment (may be denied for other users)."""
     try:
         return proc.environ()
     except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
@@ -215,7 +207,6 @@ def _dynamic_worker_details(port, proc):
 
 
 def _live_model_id(port):
-    """Return the live model id from /v1/models, or None if unavailable."""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=_MODELS_TIMEOUT) as r:
             data = json.load(r)
@@ -252,15 +243,107 @@ def collect_stats():
 base.collect_stats = collect_stats
 
 
-# Patch only the worker-rendering pieces of the existing dashboard so the rest
-# of the UI (GPU telemetry, PSU logging, terminal and host controls) stays intact.
+class PresetCommand(BaseModel):
+    profile: str
+    model: str
+    split: str = "layer"
+    ctx: int = 32768
+
+
+@base.app.get("/api/models")
+def api_models():
+    models = []
+    if _MODELS_DIR.exists():
+        for path in sorted(_MODELS_DIR.rglob("*.gguf")):
+            try:
+                rel = path.relative_to(_MODELS_DIR)
+            except ValueError:
+                rel = path.name
+            label = str(rel)
+            models.append({"label": label, "path": str(path)})
+    return {"models": models}
+
+
+@base.app.post("/api/workers/preset")
+def api_worker_preset(cmd: PresetCommand):
+    if cmd.profile not in ("33", "222"):
+        raise base.HTTPException(status_code=400, detail="invalid profile")
+    if cmd.split not in ("tensor", "layer"):
+        raise base.HTTPException(status_code=400, detail="invalid split")
+    if not (2048 <= cmd.ctx <= 262144):
+        raise base.HTTPException(status_code=400, detail="invalid context")
+    model = Path(cmd.model)
+    try:
+        model.resolve().relative_to(_MODELS_DIR.resolve())
+    except Exception:
+        raise base.HTTPException(status_code=400, detail="model must be below models directory")
+    if not model.is_file() or model.suffix.lower() != ".gguf":
+        raise base.HTTPException(status_code=400, detail="model file not found")
+    try:
+        out = base.run_workerctl("preset", cmd.profile, str(model), cmd.split, str(cmd.ctx))
+        return {"ok": True, "output": out}
+    except RuntimeError as e:
+        raise base.HTTPException(status_code=409, detail=str(e))
+
+
 _dashboard = base.DASHBOARD
 _dashboard = _dashboard.replace(
     "Model, GPU assignment, readiness and last measured throughput",
     "Auto-discovered llama.cpp processes: model, GPUs, context, readiness and throughput",
 )
 
-_worker_js = r'''function dynamicWorkerCard(p,w){
+_dashboard = _dashboard.replace(
+    '<div class="profile-actions"><button onclick="setProfile(\'33\')">3+3</button><button onclick="setProfile(\'222\')">2+2+2</button></div>',
+    '''<div class="preset-wrap">
+      <div class="preset-card-ui">
+        <button class="preset-main" onclick="applyPreset('222')"><b>2+2+2 — Daily Coding</b><small>3 workers · GPU 0+1 / 2+3 / 4+5</small></button>
+        <select id="preset222model" class="preset-model" title="Model for 2+2+2"></select>
+        <div class="preset-foot">layer · 32K</div>
+      </div>
+      <div class="preset-card-ui">
+        <button class="preset-main" onclick="applyPreset('33')"><b>3+3 — Large Context</b><small>2 workers · GPU 0+1+2 / 3+4+5</small></button>
+        <select id="preset33model" class="preset-model" title="Model for 3+3"></select>
+        <div class="preset-foot">layer · 32K</div>
+      </div>
+    </div>''',
+)
+
+_dashboard = _dashboard.replace(
+    "</style></head><body>",
+    '''.preset-wrap{display:flex;gap:8px;flex-wrap:wrap}.preset-card-ui{min-width:210px;background:#161616;border:1px solid #333;border-radius:10px;padding:7px}.preset-main{width:100%;text-align:left;padding:7px 9px}.preset-main b{display:block;font-size:12px}.preset-main small{display:block;color:#aaa;font-size:10px;margin-top:2px}.preset-model{width:100%;margin-top:5px;padding:5px 7px;font-size:10px;background:#202020}.preset-foot{font-size:10px;color:#888;margin:4px 2px 0}.preset-card-ui.busy{opacity:.6;pointer-events:none}
+</style></head><body>''',
+)
+
+_preset_js = r'''
+let presetModelsLoaded=false;
+async function loadPresetModels(){
+ if(presetModelsLoaded)return;
+ try{
+  const r=await fetch('/api/models');const d=await r.json();
+  const models=d.models||[];
+  for(const id of ['preset222model','preset33model']){
+   const el=document.getElementById(id);if(!el)continue;
+   el.innerHTML=models.map(m=>'<option value="'+m.path.replace(/"/g,'&quot;')+'">'+m.label+'</option>').join('');
+   const preferred=models.findIndex(m=>m.label.toLowerCase().includes('qwen2.5-coder-14b'));
+   if(preferred>=0)el.selectedIndex=preferred;
+  }
+  presetModelsLoaded=true;
+ }catch(e){workermsg.textContent='Model list error: '+e;}
+}
+async function applyPreset(profileId){
+ const select=document.getElementById(profileId==='222'?'preset222model':'preset33model');
+ if(!select||!select.value){workermsg.textContent='Select a GGUF model first';return;}
+ if(!confirm('Switch workers to '+(profileId==='222'?'2+2+2 Daily Coding':'3+3 Large Context')+' using '+select.options[select.selectedIndex].text+'?'))return;
+ workermsg.textContent='Applying preset…';
+ try{
+  const r=await fetch('/api/workers/preset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({profile:profileId,model:select.value,split:'layer',ctx:32768})});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  workermsg.textContent='Preset applied: '+(d.output||'OK');setTimeout(refresh,800);
+ }catch(e){workermsg.textContent='Preset error: '+e.message;}
+}
+'''
+
+_worker_js = _preset_js + r'''function dynamicWorkerCard(p,w){
  const model=w.model||'llama-server';
  const gen=w.last_tok_s!=null?w.last_tok_s.toFixed(2):'—';
  const prompt=w.last_prompt_tok_s!=null?w.last_prompt_tok_s.toFixed(1):'—';
@@ -292,6 +375,7 @@ _refresh_workers = r''' const ws=s.llama.workers||{};const ports=Object.keys(ws)
  workers.innerHTML='<span class="ready">'+readyCount+'</span>/<span class="loading">'+loadingCount+'</span>/<span class="down">'+downCount+'</span>';
  profile.innerHTML='auto-discovery • '+ports.length+' llama-server'+(ports.length===1?'':'s')+' • managed profile '+(s.llama.profile==='222'?'2+2+2':'3+3');
  workerbuttons.innerHTML=ports.length?ports.map(p=>dynamicWorkerCard(p,ws[String(p)]||{})).join(''):'<div class="muted">No llama-server processes discovered</div>';
+ loadPresetModels();
 '''
 
 _dashboard, n = re.subn(
