@@ -24,6 +24,81 @@ svc_for_port() {
   esac
 }
 
+normal_user() {
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != root ]]; then
+    printf '%s\n' "$SUDO_USER"
+  else
+    printf '%s\n' "${AI6_WORKER_USER:-ai6}"
+  fi
+}
+
+user_home() {
+  getent passwd "$(normal_user)" | cut -d: -f6
+}
+
+validate_model() {
+  local model="$1" home
+  home="$(user_home)"
+  [[ -f "$model" ]] || { echo "model does not exist: $model"; exit 4; }
+  [[ "$model" == "$home"/models/*.gguf || "$model" == "$home"/models/*/*.gguf || "$model" == "$home"/models/*/*/*.gguf ]] || {
+    echo "model must be a GGUF below $home/models"; exit 4;
+  }
+}
+
+write_override() {
+  local service="$1" gpus="$2" port="$3" alias="$4" model="$5" split="$6" ctx="$7"
+  local user home llama dir ts=""
+  user="$(normal_user)"
+  home="$(user_home)"
+  llama="$home/llama.cpp/build/bin/llama-server"
+  [[ -x "$llama" ]] || { echo "llama-server not found: $llama"; exit 5; }
+
+  if [[ "$split" == tensor ]]; then
+    case "$gpus" in
+      *,*,*) ts="-ts 1,1,1" ;;
+      *,*)   ts="-ts 1,1" ;;
+      *)     ts="" ;;
+    esac
+  fi
+
+  dir="/etc/systemd/system/${service}.service.d"
+  mkdir -p "$dir"
+  cat >"$dir/90-ai6-ui.conf" <<EOF
+[Service]
+Environment="CUDA_VISIBLE_DEVICES=${gpus}"
+ExecStart=
+ExecStart=/bin/bash -lc 'exec "${llama}" -m "${model}" -ngl 999 -sm ${split} ${ts} -c ${ctx} -np 1 --alias ${alias} --host 0.0.0.0 --port ${port}'
+EOF
+}
+
+apply_preset() {
+  local profile="$1" model="$2" split="$3" ctx="$4"
+  validate_model "$model"
+  [[ "$split" == tensor || "$split" == layer ]] || { echo "split must be tensor or layer"; exit 2; }
+  [[ "$ctx" =~ ^[0-9]+$ ]] && (( ctx >= 2048 && ctx <= 262144 )) || { echo "invalid context"; exit 2; }
+
+  systemctl disable --now llama-8081 llama-8082 llama2-8081 llama2-8082 llama2-8083 2>/dev/null || true
+
+  case "$profile" in
+    33)
+      write_override llama-8081  "0,1,2" 8081 "ai6-3gpu-012" "$model" "$split" "$ctx"
+      write_override llama-8082  "3,4,5" 8082 "ai6-3gpu-345" "$model" "$split" "$ctx"
+      systemctl daemon-reload
+      systemctl enable --now llama-8081 llama-8082
+      ;;
+    222)
+      write_override llama2-8081 "0,1" 8081 "ai6-2gpu-01" "$model" "$split" "$ctx"
+      write_override llama2-8082 "2,3" 8082 "ai6-2gpu-23" "$model" "$split" "$ctx"
+      write_override llama2-8083 "4,5" 8083 "ai6-2gpu-45" "$model" "$split" "$ctx"
+      systemctl daemon-reload
+      systemctl enable --now llama2-8081 llama2-8082 llama2-8083
+      ;;
+    *) echo "profile must be 33 or 222"; exit 2 ;;
+  esac
+
+  echo "profile=$profile model=$model split=$split ctx=$ctx"
+}
+
 case "${1:-}" in
   status)
     echo "profile=$(active_profile)"
@@ -37,6 +112,10 @@ case "${1:-}" in
     svc="$(svc_for_port "$2")" || { echo "port $2 is not part of active profile"; exit 2; }
     systemctl "$1" "$svc"
     ;;
+  preset)
+    [[ $# -eq 5 ]] || { echo "usage: $0 preset 33|222 /path/model.gguf tensor|layer context"; exit 2; }
+    apply_preset "$2" "$3" "$4" "$5"
+    ;;
   profile)
     case "${2:-}" in
       33)
@@ -48,7 +127,7 @@ case "${1:-}" in
         # shellcheck disable=SC1090
         source "$ENV_FILE"
         [[ -n "${MODEL_2GPU:-}" && -f "${MODEL_2GPU:-}" ]] || {
-          echo "MODEL_2GPU is not configured or file does not exist. Current Qwen3-Coder 30B Q4_K is ~18.5 GB and cannot fit on 2x8 GB."
+          echo "MODEL_2GPU is not configured or file does not exist. Use the dashboard preset selector or configure $ENV_FILE."
           exit 4
         }
         systemctl disable --now llama-8081 llama-8082 2>/dev/null || true
@@ -58,7 +137,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: $0 status | start|stop|restart 8081|8082|8083 | profile 33|222"
+    echo "usage: $0 status | start|stop|restart 8081|8082|8083 | profile 33|222 | preset 33|222 MODEL tensor|layer CTX"
     exit 2
     ;;
 esac
