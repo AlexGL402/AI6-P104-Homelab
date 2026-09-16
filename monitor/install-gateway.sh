@@ -17,6 +17,12 @@ SERVICE=/etc/systemd/system/ai6-model-gateway.service
 
 "$VENV/bin/pip" install -r "$MON_DIR/requirements.txt"
 
+# Web tools + read-only GitHub MCP tools used by the local coding agent.
+# The GitHub MCP container itself is also started in read-only mode, so this
+# allow-list is defense in depth and prevents unrelated Open WebUI tools such
+# as ask_user from reaching llama.cpp.
+ALLOWED_TOOLS="search_web,fetch_url,web_search,fetch_webpage,get_file_contents,search_code,search_repositories,list_branches,list_commits,get_commit,issue_read,get_issue,list_issues,get_issue_comments,search_issues,pull_request_read,list_pull_requests,search_pull_requests,get_latest_release,get_release_by_tag,list_releases,list_tags,get_tag"
+
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 cat >"$TMP" <<EOF
@@ -33,6 +39,7 @@ Group=${GROUP_NAME}
 WorkingDirectory=${MON_DIR}
 Environment=PYTHONUNBUFFERED=1
 Environment=AI6_MONITOR_URL=http://127.0.0.1:8090
+Environment="AI6_GATEWAY_ALLOWED_TOOLS=${ALLOWED_TOOLS}"
 ExecStart=${VENV}/bin/uvicorn ai6_model_gateway:app --host 0.0.0.0 --port 8099
 Restart=always
 RestartSec=3
