@@ -24,6 +24,14 @@ svc_for_port() {
   esac
 }
 
+profile_services() {
+  case "$1" in
+    33) echo "llama-8081 llama-8082" ;;
+    222) echo "llama2-8081 llama2-8082 llama2-8083" ;;
+    *) return 1 ;;
+  esac
+}
+
 normal_user() {
   if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != root ]]; then
     printf '%s\n' "$SUDO_USER"
@@ -99,6 +107,29 @@ apply_preset() {
   echo "profile=$profile model=$model split=$split ctx=$ctx"
 }
 
+control_profile() {
+  local profile="$1" action="$2" services
+  services="$(profile_services "$profile")" || { echo "profile must be 33 or 222"; exit 2; }
+  case "$action" in
+    start)
+      if [[ "$profile" == 33 ]]; then
+        systemctl disable --now llama2-8081 llama2-8082 llama2-8083 2>/dev/null || true
+      else
+        systemctl disable --now llama-8081 llama-8082 2>/dev/null || true
+      fi
+      systemctl enable --now $services
+      ;;
+    stop)
+      systemctl stop $services
+      ;;
+    restart)
+      systemctl restart $services
+      ;;
+    *) echo "action must be start, stop or restart"; exit 2 ;;
+  esac
+  echo "profile=$profile action=$action"
+}
+
 case "${1:-}" in
   status)
     echo "profile=$(active_profile)"
@@ -115,6 +146,10 @@ case "${1:-}" in
   preset)
     [[ $# -eq 5 ]] || { echo "usage: $0 preset 33|222 /path/model.gguf tensor|layer context"; exit 2; }
     apply_preset "$2" "$3" "$4" "$5"
+    ;;
+  preset-control)
+    [[ $# -eq 3 ]] || { echo "usage: $0 preset-control 33|222 start|stop|restart"; exit 2; }
+    control_profile "$2" "$3"
     ;;
   profile)
     case "${2:-}" in
@@ -137,7 +172,7 @@ case "${1:-}" in
     esac
     ;;
   *)
-    echo "usage: $0 status | start|stop|restart 8081|8082|8083 | profile 33|222 | preset 33|222 MODEL tensor|layer CTX"
+    echo "usage: $0 status | start|stop|restart 8081|8082|8083 | preset 33|222 MODEL tensor|layer CTX | preset-control 33|222 start|stop|restart"
     exit 2
     ;;
 esac
