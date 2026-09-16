@@ -19,8 +19,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 MONITOR_URL = os.environ.get("AI6_MONITOR_URL", "http://127.0.0.1:8090").rstrip("/")
 REQUEST_TIMEOUT = float(os.environ.get("AI6_GATEWAY_TIMEOUT", "1800"))
+# Open WebUI may attach native function tools such as ask_user.  The current
+# local llama.cpp workers are used as plain chat/completion backends, so strip
+# tool-control fields by default.  Set AI6_GATEWAY_PASS_TOOLS=1 later if a
+# model/template is deliberately configured for native tool calling.
+PASS_TOOLS = os.environ.get("AI6_GATEWAY_PASS_TOOLS", "0").lower() in ("1", "true", "yes", "on")
 
-app = FastAPI(title="AI6 Model Gateway", version="1.0.0")
+app = FastAPI(title="AI6 Model Gateway", version="1.1.0")
 
 _inflight: dict[int, int] = defaultdict(int)
 _rr: dict[str, int] = defaultdict(int)
@@ -69,7 +74,6 @@ async def _ready_groups() -> dict[str, list[dict[str, Any]]]:
 async def _pick_worker(model_id: str) -> dict[str, Any]:
     groups = await _ready_groups()
 
-    # Debug/direct addressing: <model>@<port>
     if "@" in model_id:
         base, port_text = model_id.rsplit("@", 1)
         try:
@@ -84,7 +88,6 @@ async def _pick_worker(model_id: str) -> dict[str, Any]:
     if not candidates:
         raise HTTPException(status_code=404, detail=f"No ready worker for model '{model_id}'")
 
-    # Prefer the least busy worker, round-robin among ties.
     async with _lock:
         minimum = min(_inflight[w["port"]] for w in candidates)
         tied = [w for w in candidates if _inflight[w["port"]] == minimum]
@@ -93,10 +96,27 @@ async def _pick_worker(model_id: str) -> dict[str, Any]:
         return tied[idx]
 
 
+def _sanitize_openwebui_body(body: dict[str, Any]) -> dict[str, Any]:
+    if PASS_TOOLS:
+        return body
+    # Open WebUI can auto-attach built-in tool schemas.  Without a deliberately
+    # configured native-tool chat template the model may emit a tool call
+    # (often ask_user) instead of a normal assistant answer.  Remove those
+    # controls for the plain-chat gateway while leaving messages untouched.
+    for key in ("tools", "tool_choice", "parallel_tool_calls"):
+        body.pop(key, None)
+    return body
+
+
 @app.get("/health")
 async def health():
     groups = await _ready_groups()
-    return {"status": "ok", "models": len(groups), "workers": sum(map(len, groups.values()))}
+    return {
+        "status": "ok",
+        "models": len(groups),
+        "workers": sum(map(len, groups.values())),
+        "pass_tools": PASS_TOOLS,
+    }
 
 
 @app.get("/v1/models")
@@ -111,7 +131,6 @@ async def models():
             "ai6_workers": [w["port"] for w in workers],
             "ai6_gpus": [w.get("gpu_devices") or [] for w in workers],
         })
-        # Also expose direct worker ids for diagnostics/manual pinning.
         for w in workers:
             data.append({
                 "id": f"{model_id}@{w['port']}",
@@ -129,13 +148,16 @@ async def _proxy_openai(request: Request, suffix: str):
     except Exception:
         raise HTTPException(status_code=400, detail="JSON body required")
 
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+
     model_id = str(body.get("model") or "")
     if not model_id:
         raise HTTPException(status_code=400, detail="model is required")
 
     worker = await _pick_worker(model_id)
     port = worker["port"]
-    # llama.cpp aliases can differ per worker, so use its live model id.
+    body = _sanitize_openwebui_body(body)
     body["model"] = worker.get("model") or model_id.split("@", 1)[0]
     stream = bool(body.get("stream"))
     url = f"http://127.0.0.1:{port}/v1/{suffix}"
