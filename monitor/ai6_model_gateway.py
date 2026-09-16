@@ -18,6 +18,7 @@ agentic web search when Open WebUI attaches search_web/fetch_url tools.
 
 import asyncio
 import json
+import logging
 import os
 from collections import defaultdict
 from pathlib import Path
@@ -41,6 +42,8 @@ _ALLOWED_TOOLS_RAW = os.environ.get(
 ALLOWED_TOOLS = {x.strip() for x in _ALLOWED_TOOLS_RAW.split(",") if x.strip()}
 
 app = FastAPI(title="AI6 Model Gateway", version="1.4.0")
+
+log = logging.getLogger("ai6_model_gateway")
 
 _inflight: dict[int, int] = defaultdict(int)
 _rr: dict[str, int] = defaultdict(int)
@@ -320,6 +323,10 @@ async def _proxy_openai(request: Request, suffix: str):
 
     worker = await _pick_worker(model_id)
     port = worker["port"]
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools:
+        incoming_tools = [n for n in (_tool_name(t) for t in tools) if n]
+        log.info("incoming tools: %s", incoming_tools)
     body = _sanitize_openwebui_body(body)
     body["model"] = worker.get("model") or worker.get("public_model") or model_id.split("@", 1)[0]
     stream = bool(body.get("stream"))
