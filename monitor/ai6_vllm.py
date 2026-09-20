@@ -1010,7 +1010,7 @@ def install():
       <div id="vllmState" class="status down">● STOPPED</div>
     </div>
     <div class="vllm-form">
-      <label>Model<select id="vllmModel"></select></label>
+      <label>Model<div class="vllm-model-row"><select id="vllmModel"></select><button type="button" title="Reload model list" onclick="loadVllmModels(true)">↻</button></div></label>
       <label>Port<input id="vllmPort" type="number" value="8012" min="1024" max="65535"></label>
       <label>Context<input id="vllmCtx" type="number" value="4096" min="256"></label>
       <label>GPU memory<input id="vllmMem" type="number" value="0.90" min="0.10" max="0.99" step="0.01"></label>
@@ -1130,7 +1130,7 @@ def install():
     css = r'''
 .top-tabs{display:flex;gap:8px;margin:14px 0 2px}.tab-btn{padding:8px 16px}.tab-btn.active{border-color:#7be495;color:#7be495;background:#172019}
 .vllm-form{display:grid;grid-template-columns:minmax(250px,2fr) repeat(3,minmax(105px,1fr)) minmax(120px,1fr) minmax(300px,1.5fr);gap:8px;align-items:end}
-.vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
+.vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-model-row{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px;align-items:end}.vllm-model-row button{height:32px;padding:0}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
 .vllm-load-wrap{margin-top:10px}.vllm-load-line{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#bbb}.vllm-load-bar{height:9px;background:#2b2b2b;border:1px solid #383838;border-radius:6px;overflow:hidden;margin-top:5px}.vllm-load-fill{height:100%;width:0%;background:#8a8a8a;transition:width .35s ease}.vllm-load-sub{font-size:10px;color:#888;margin-top:4px}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
@@ -1163,16 +1163,32 @@ function showTopTab(which){
  if(which==='benchs'){loadBenchHistory();}
 }
 
-async function loadVllmModels(){
- if(vllmModelsLoaded)return;
+async function loadVllmModels(force=false){
+ if(vllmModelsLoaded&&!force&&document.getElementById('vllmModel')?.options?.length)return;
  try{
-  const r=await fetch('/api/vllm/models');const d=await r.json();
+  const r=await fetch('/api/vllm/models',{cache:'no-store'});const d=await r.json();
+  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
   const el=document.getElementById('vllmModel');
-  el.innerHTML=(d.models||[]).map(m=>'<option value="'+m.path.replace(/"/g,'&quot;')+'">'+m.label+'</option>').join('');
-  const preferred=(d.models||[]).findIndex(m=>m.label.toLowerCase().includes('qwen3-4b-awq'));
-  if(preferred>=0)el.selectedIndex=preferred;
+  const previous=el.value;
+  const models=d.models||[];
+  if(!models.length){
+    el.innerHTML='<option value="">No models found</option>';
+    vllmModelsLoaded=false;
+    vllmMsg.textContent='No models found in ~/models/vllm';
+    return;
+  }
+  el.innerHTML=models.map(m=>'<option value="'+m.path.replace(/"/g,'&quot;')+'">'+m.label+'</option>').join('');
+  const previousIndex=models.findIndex(m=>m.path===previous);
+  if(previousIndex>=0)el.selectedIndex=previousIndex;
+  else{
+    const preferred=models.findIndex(m=>m.label.toLowerCase().includes('qwen3-4b-awq'));
+    if(preferred>=0)el.selectedIndex=preferred;
+  }
   vllmModelsLoaded=true;
- }catch(e){vllmMsg.textContent='Model list error: '+e;}
+ }catch(e){
+  vllmModelsLoaded=false;
+  vllmMsg.textContent='Model list error: '+e.message;
+ }
 }
 
 function applyPlPresetToInput(){
@@ -1518,6 +1534,7 @@ async function runVllmBench(concurrency){
   await refreshVllm();
  }catch(e){vllmBenchMsg.textContent='Benchmark error: '+e.message;}
 }
+setTimeout(()=>loadVllmModels(true),300);
 setInterval(()=>{if(document.getElementById('vllmTab')&&document.getElementById('vllmTab').style.display!=='none')refreshVllm();},2000);
 setInterval(()=>{if(document.getElementById('vllmTab')&&document.getElementById('vllmTab').style.display!=='none')refreshGpuPowerLimitInfo();},10000);
 '''
