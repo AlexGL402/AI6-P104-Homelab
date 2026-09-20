@@ -2,6 +2,7 @@
 """ForgeMiner / PearlHash tab for the AI6 Host Monitor."""
 
 import json
+import html
 import os
 import re
 import shlex
@@ -314,6 +315,70 @@ def _num(v):
         return None
 
 
+def _scaled_number(value, suffix=""):
+    v = _num(value)
+    if v is None:
+        return None
+    mult = {
+        "": 1.0, "k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12,
+        "p": 1e15, "e": 1e18,
+    }.get(str(suffix or "").strip().lower(), 1.0)
+    return v * mult
+
+
+def _extract_pearltrack_live():
+    """Read the explorer's current headline stats (price + network) from one source."""
+    try:
+        raw, _ = _http_get("https://www.pearltrack.io/")
+        text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        text = re.sub(r"\s+", " ", text)
+
+        out = {"source": "PearlTrack"}
+
+        m = re.search(r"PRL Price\s*\$?\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
+        if m:
+            out["prl_usdt"] = _num(m.group(1))
+
+        m = re.search(
+            r"Network Hashrate\s*([0-9]+(?:\.[0-9]+)?)\s*([kKmMgGtTpPeE]?H/s)",
+            text, re.I
+        )
+        if m:
+            unit = m.group(2).lower()
+            unit_mult = {
+                "h/s": 1.0, "kh/s": 1e3, "mh/s": 1e6, "gh/s": 1e9,
+                "th/s": 1e12, "ph/s": 1e15, "eh/s": 1e18,
+            }.get(unit)
+            if unit_mult:
+                out["network_hashrate_hs"] = float(m.group(1)) * unit_mult
+
+        m = re.search(r"Difficulty\s*([0-9]+(?:\.[0-9]+)?)\s*([kKmMbBtT]?)", text, re.I)
+        if m:
+            out["difficulty"] = _scaled_number(m.group(1), m.group(2))
+
+        m = re.search(r"~\s*([0-9]+(?:\.[0-9]+)?)\s*s\s*/\s*block", text, re.I)
+        if m:
+            out["block_time_s"] = _num(m.group(1))
+
+        m = re.search(r"Block Reward\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*PRL", text, re.I)
+        if m:
+            out["block_reward_prl"] = _num(m.group(1))
+
+        m = re.search(r"Block Height\s*([0-9][0-9,]*)", text, re.I)
+        if m:
+            h = _num(m.group(1))
+            out["height"] = int(h) if h else None
+
+        if any(out.get(k) is not None for k in (
+            "prl_usdt", "network_hashrate_hs", "difficulty",
+            "block_time_s", "block_reward_prl"
+        )):
+            return out
+    except Exception:
+        pass
+    return {}
+
+
 def _extract_safetrade_price():
     # SafeTrade's public API has changed paths over time, so try known public
     # ticker routes first and then fall back to the public markets page.
@@ -348,9 +413,11 @@ def _extract_safetrade_price():
         raw, _ = _http_get("https://safetrade.com/markets")
         # The public page renders a PRL/USDT row. Keep the expression loose
         # enough to survive minor markup changes.
+        text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        text = re.sub(r"\s+", " ", text)
         m = re.search(
-            r"PRL\s*/\s*USDT.{0,1200}?([0-9]+(?:\.[0-9]+)?)",
-            re.sub(r"\s+", " ", raw),
+            r"PRL\s*/\s*USDT\s*(?:[+-]?[0-9]+(?:\.[0-9]+)?%\s*)?([0-9]+(?:\.[0-9]+)?)",
+            text,
             re.I,
         )
         if m:
@@ -485,9 +552,38 @@ def _live_market_data():
     if now - float(_MARKET_CACHE.get("ts") or 0) < 60 and _MARKET_CACHE.get("data"):
         return _MARKET_CACHE["data"]
 
-    price, price_source = _extract_safetrade_price()
+    # PearlTrack is the primary source because its homepage exposes mutually
+    # consistent price, network hashrate, difficulty, block time and reward.
+    # It also tracks the SafeTrade PRL market. Fallbacks fill only missing fields.
+    pt = _extract_pearltrack_live()
     usd_kzt, fx_source = _extract_usd_kzt()
-    network = _extract_network()
+
+    price = pt.get("prl_usdt")
+    price_source = "PearlTrack (SafeTrade)" if price else None
+    if price is None:
+        price, price_source = _extract_safetrade_price()
+
+    network = {
+        "network_hashrate_hs": pt.get("network_hashrate_hs"),
+        "difficulty": pt.get("difficulty"),
+        "block_reward_prl": pt.get("block_reward_prl"),
+        "block_time_s": pt.get("block_time_s"),
+        "height": pt.get("height"),
+        "source": pt.get("source"),
+    }
+
+    # Only use legacy network extraction if PearlTrack failed entirely.
+    if not all(network.get(k) is not None for k in (
+        "network_hashrate_hs", "difficulty", "block_reward_prl", "block_time_s"
+    )):
+        fallback = _extract_network()
+        for k, v in fallback.items():
+            if network.get(k) is None and v is not None:
+                network[k] = v
+        if network.get("source") and fallback.get("source"):
+            network["source"] += " + " + fallback["source"]
+        elif fallback.get("source"):
+            network["source"] = fallback["source"]
 
     data = {
         "prl_usdt": price,
@@ -500,7 +596,6 @@ def _live_market_data():
     _MARKET_CACHE["ts"] = now
     _MARKET_CACHE["data"] = data
     return data
-
 
 def _to_hs(rate, unit):
     if rate is None:
