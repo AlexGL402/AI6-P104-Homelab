@@ -2,6 +2,7 @@
 """vLLM control/status tab for the AI6 Host Monitor."""
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -731,6 +732,9 @@ def _single_benchmark_report(x):
         "## Request shape",
         f"- Concurrent requests: {x.get('concurrency', '-')}",
         f"- Prompt profile: {x.get('prompt_profile') or '-'}",
+        f"- Prompt profile ID: {x.get('prompt_profile_id') or '-'}",
+        f"- Prompt set SHA256: {x.get('prompt_set_hash') or '-'}",
+        f"- First prompt SHA256: {x.get('prompt_first_hash') or '-'}",
         f"- Temperature: {x.get('temperature', '-')}",
         f"- Thinking: {'ON' if x.get('enable_thinking') else 'OFF'}",
         f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
@@ -942,6 +946,8 @@ def _combined_benchmark_report_html(rows):
             <div><span>PCIe</span><b>{h("; ".join("GPU"+str(p.get("index","?"))+": G"+str(p.get("gen_current") or "?")+" x"+str(p.get("width_current") or "?") for p in (x.get("pcie") or [])) or "-")}</b></div>
             <div><span>Context</span><b>{h(x.get("context") or "-")}</b></div>
             <div><span>Prompt profile</span><b>{h(x.get("prompt_profile") or "-")}</b></div>
+            <div><span>Prompt ID</span><b>{h(x.get("prompt_profile_id") or "-")}</b></div>
+            <div><span>Prompt hash</span><b title="{h(x.get("prompt_set_hash") or "-")}">{h((x.get("prompt_set_hash") or "-")[:12])}</b></div>
             <div><span>Temperature</span><b>{h(x.get("temperature") if x.get("temperature") is not None else "-")}</b></div>
             <div><span>Thinking</span><b>{'ON' if x.get("enable_thinking") else 'OFF'}</b></div>
             <div><span>Mode</span><b>{h(x.get("mode") or "-")}</b></div>
@@ -1206,6 +1212,8 @@ def api_vllm_report():
                 f"- Driver: {x.get('driver_version') or '-'}",
                 f"- CUDA runtime: {(x.get('cuda') or {}).get('cuda_runtime') or '-'}",
                 f"- Torch: {(x.get('cuda') or {}).get('torch') or '-'}",
+                f"- Prompt profile ID: {x.get('prompt_profile_id') or '-'}",
+                f"- Prompt set SHA256: {x.get('prompt_set_hash') or '-'}",
                 f"- Temperature: {x.get('temperature', '-')}",
                 f"- Thinking: {'ON' if x.get('enable_thinking') else 'OFF'}",
                 f"- PCIe: {'; '.join('GPU'+str(p.get('index','?'))+': Gen'+str(p.get('gen_current') or '?')+' x'+str(p.get('width_current') or '?')+' (max Gen'+str(p.get('gen_max') or '?')+' x'+str(p.get('width_max') or '?')+')' for p in (x.get('pcie') or [])) or '-'}",
@@ -1381,6 +1389,11 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         _benchmark_prompt(i, cmd.prompt_profile)
         for i in range(1, cmd.concurrency + 1)
     ]
+    prompt_profile_id = f"{cmd.prompt_profile}-v1"
+    prompt_set_hash = hashlib.sha256(
+        json.dumps(prompts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    prompt_first_hash = hashlib.sha256(prompts[0].encode("utf-8")).hexdigest() if prompts else None
     started = time.perf_counter()
     samples = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=cmd.concurrency) as pool:
@@ -1413,6 +1426,9 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "temperature": cmd.temperature,
         "enable_thinking": bool(cmd.enable_thinking),
         "prompt_profile": cmd.prompt_profile,
+        "prompt_profile_id": prompt_profile_id,
+        "prompt_set_hash": prompt_set_hash,
+        "prompt_first_hash": prompt_first_hash,
         "prompt_tokens": total_prompt_tokens,
         "output_tokens": total_output_tokens,
         "total_tokens": total_tokens,
@@ -1604,7 +1620,7 @@ def install():
     </div>
     <div class="vllm-table-wrap">
       <table class="vllm-table">
-        <thead><tr><th>✓</th><th>Concurrent</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th><th>Comment</th></tr></thead>
+        <thead><tr><th>✓</th><th>Concurrent</th><th>Prompt hash</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th><th>Comment</th></tr></thead>
         <tbody id="vllmBenchRows"><tr><td colspan="5" class="muted">No UI benchmark runs yet</td></tr></tbody>
       </table>
     </div>
@@ -1661,13 +1677,13 @@ def install():
       <table class="vllm-table bench-history-table">
         <thead>
           <tr>
-            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Think</th><th>Conc</th>
+            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Think</th><th>Prompt hash</th><th>Conc</th>
             <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
             <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
             <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
           </tr>
         </thead>
-        <tbody id="benchHistoryRows"><tr><td colspan="19" class="muted">Loading benchmark history…</td></tr></tbody>
+        <tbody id="benchHistoryRows"><tr><td colspan="20" class="muted">Loading benchmark history…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1867,7 +1883,8 @@ function renderVllmBench(rows){
    const comment=(x.comment||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
    const sel=x.run_id?'<input class="bench-select vllm-bench-select" type="checkbox" data-run-id="'+runId+'" onchange="saveBenchMeta(\''+runId+'\',{selected:this.checked})"'+checked+uploaded+'>':'—';
    const note=x.run_id?'<input class="bench-comment" value="'+comment+'" placeholder="comment…" onblur="saveBenchMeta(\''+runId+'\',{comment:this.value})">':'';
-   return '<tr><td>'+sel+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td><td>'+note+'</td></tr>';
+   const ph=(x.prompt_set_hash||'—'), phShort=ph==='—'?ph:ph.slice(0,12);
+   return '<tr><td>'+sel+'</td><td>'+x.concurrency+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
@@ -2140,7 +2157,8 @@ function renderBenchHistory(){
    const actions=rawId?'<span class="run-report-actions"><a class="run-dl" title="Download report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'—';
    const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
    const pcie=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ')||'—';
-   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+   const ph=(x.prompt_set_hash||'—'); const phShort=ph==='—'?ph:ph.slice(0,12);
+   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
