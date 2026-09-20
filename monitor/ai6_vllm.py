@@ -890,7 +890,7 @@ def _combined_benchmark_report_html(rows):
           <td><b>{h(x.get("model") or "-")}</b><div class="sub">{h(x.get("quantization") or "-")}</div></td>
           <td>{h(_gpu_config_label(x))}</td>
           <td>{h("; ".join("GPU"+str(p.get("index","?"))+": G"+str(p.get("gen_current") or "?")+" x"+str(p.get("width_current") or "?") for p in (x.get("pcie") or [])) or "-")}</td>
-          <td>{h(x.get("prompt_profile") or "-")}</td>
+          <td><span class="profile {h((x.get("prompt_profile") or "").lower())}">{h((x.get("prompt_profile") or "-")[:1].upper())}</span><span class="profile-name">{h(x.get("prompt_profile") or "-")}</span></td>
           <td>{h(x.get("temperature") if x.get("temperature") is not None else "-")}</td>
           <td><b>{'ON' if x.get("enable_thinking") else 'OFF'}</b></td>
           <td>{h(x.get("concurrency","-"))}</td>
@@ -976,7 +976,7 @@ def _combined_benchmark_report_html(rows):
 .card{{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}} .card span,.card small{{display:block;color:var(--muted)}} .card b{{display:block;font-size:22px;margin:2px 0}}
 .table-wrap{{overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}} table{{border-collapse:collapse;width:100%;min-width:1450px}}
 th,td{{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}} th{{position:sticky;top:0;background:#202226;color:#c9cdd1;font-size:12px;z-index:1}}
-tbody tr:nth-child(even){{background:#141516}} tbody tr:hover{{background:#22252a}} .nowrap{{white-space:nowrap}} .sub{{color:var(--muted);font-size:11px;margin-top:2px}} .hot{{color:var(--green);font-weight:700}} .comment{{min-width:160px;max-width:260px;white-space:normal}}
+tbody tr:nth-child(even){{background:#141516}} tbody tr:hover{{background:#22252a}} .nowrap{{white-space:nowrap}} .sub{{color:var(--muted);font-size:11px;margin-top:2px}} .hot{{color:var(--green);font-weight:700}} .comment{{min-width:160px;max-width:260px;white-space:normal}} .profile{{display:inline-flex;align-items:center;justify-content:center;width:21px;height:21px;border-radius:999px;font-weight:800;margin-right:6px}} .profile.short{{color:#8ee7a0;background:#16311d;border:1px solid #2d7140}} .profile.medium{{color:#ffd56a;background:#332a11;border:1px solid #7f681f}} .profile.long{{color:#ff8c8c;background:#351818;border:1px solid #7d3131}} .profile-name{{color:var(--muted);font-size:11px}}
 details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px}} summary{{cursor:pointer;font-weight:700}}
 .detail-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px}} .detail-grid>div{{background:#121315;border:1px solid #292b2f;border-radius:7px;padding:8px}} .detail-grid span{{display:block;color:var(--muted);font-size:11px}} .detail-grid b{{display:block;margin-top:2px}}
 .note{{color:var(--muted);font-size:12px;margin-top:12px}}
@@ -1620,7 +1620,7 @@ def install():
     </div>
     <div class="vllm-table-wrap">
       <table class="vllm-table">
-        <thead><tr><th>✓</th><th>Concurrent</th><th>Prompt hash</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th><th>Comment</th></tr></thead>
+        <thead><tr><th>✓</th><th>Concurrent</th><th>Profile</th><th>Prompt hash</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th><th>Comment</th></tr></thead>
         <tbody id="vllmBenchRows"><tr><td colspan="5" class="muted">No UI benchmark runs yet</td></tr></tbody>
       </table>
     </div>
@@ -1677,13 +1677,13 @@ def install():
       <table class="vllm-table bench-history-table">
         <thead>
           <tr>
-            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Think</th><th>Prompt hash</th><th>Conc</th>
+            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Think</th><th>Profile</th><th>Prompt hash</th><th>Conc</th>
             <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
             <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
             <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
           </tr>
         </thead>
-        <tbody id="benchHistoryRows"><tr><td colspan="20" class="muted">Loading benchmark history…</td></tr></tbody>
+        <tbody id="benchHistoryRows"><tr><td colspan="21" class="muted">Loading benchmark history…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1700,6 +1700,7 @@ def install():
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini b.ok{color:var(--ok)}.vllm-mini b.warn{color:var(--warn)}.vllm-mini b.bad{color:var(--bad)}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-prompt{width:100%;min-height:120px;resize:vertical;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.vllm-prompt-actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:8px}.vllm-prompt-actions label{font-size:10px;color:#aaa}.vllm-prompt-actions input{display:block;width:100px;margin-top:3px;padding:6px}.vllm-prompt-output{margin:10px 0 0;max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#101010;border:1px solid #303030;border-radius:8px;padding:10px;font-size:11px;line-height:1.4;color:#ddd}
+.prompt-badge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;font-size:10px;font-weight:800;margin-right:5px;border:1px solid transparent}.prompt-badge.s{color:#8ee7a0;background:#16311d;border-color:#2d7140}.prompt-badge.m{color:#ffd56a;background:#332a11;border-color:#7f681f}.prompt-badge.l{color:#ff8c8c;background:#351818;border-color:#7d3131}
 .vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
 .vllm-bench-config{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin:0 0 10px}.vllm-bench-config label{font-size:10px;color:#999}.vllm-bench-config select,.vllm-bench-config input{display:block;margin-top:3px;padding:6px 8px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}.bench-custom-conc{display:flex;gap:4px}.bench-custom-conc input{width:72px}.bench-custom-conc button{padding:6px 10px}
 .vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
@@ -1884,7 +1885,7 @@ function renderVllmBench(rows){
    const sel=x.run_id?'<input class="bench-select vllm-bench-select" type="checkbox" data-run-id="'+runId+'" onchange="saveBenchMeta(\''+runId+'\',{selected:this.checked})"'+checked+uploaded+'>':'—';
    const note=x.run_id?'<input class="bench-comment" value="'+comment+'" placeholder="comment…" onblur="saveBenchMeta(\''+runId+'\',{comment:this.value})">':'';
    const ph=(x.prompt_set_hash||'—'), phShort=ph==='—'?ph:ph.slice(0,12);
-   return '<tr><td>'+sel+'</td><td>'+x.concurrency+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td><td>'+note+'</td></tr>';
+   return '<tr><td>'+sel+'</td><td>'+x.concurrency+'</td><td>'+promptProfileBadge(x.prompt_profile)+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
@@ -2047,6 +2048,14 @@ async function uploadSelectedBenchmarks(){
 
 let benchHistoryData=[];
 
+function promptProfileBadge(profile){
+ const p=String(profile||'').toLowerCase();
+ if(p==='short')return '<span class="prompt-badge s" title="Short prompt">S</span>';
+ if(p==='medium')return '<span class="prompt-badge m" title="Medium prompt">M</span>';
+ if(p==='long')return '<span class="prompt-badge l" title="Long prompt">L</span>';
+ return '<span class="prompt-badge" title="Unknown prompt profile">?</span>';
+}
+
 function escHtml(v){
  return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -2158,7 +2167,7 @@ function renderBenchHistory(){
    const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
    const pcie=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ')||'—';
    const ph=(x.prompt_set_hash||'—'); const phShort=ph==='—'?ph:ph.slice(0,12);
-   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td>'+promptProfileBadge(x.prompt_profile)+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
