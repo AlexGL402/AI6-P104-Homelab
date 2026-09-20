@@ -26,9 +26,20 @@ _VLLM_BIN = Path(os.environ.get("AI6_VLLM_BIN", str(_VLLM_ENV / "bin/vllm")))
 _VLLM_MODELS_DIR = Path(os.environ.get("AI6_VLLM_MODELS_DIR", str(Path.home() / "models/vllm")))
 _VLLM_LOG_DIR = Path(os.environ.get("AI6_VLLM_LOG_DIR", str(Path.home() / ".local/state/ai6-monitor/vllm")))
 _VLLM_DEFAULT_PORT = int(os.environ.get("AI6_VLLM_PORT", "8012"))
+_STATE_DIR = Path(os.environ.get("AI6_MONITOR_STATE_DIR", str(Path.home() / ".local/state/ai6-monitor")))
+_BENCH_STORE = Path(os.environ.get("AI6_VLLM_BENCH_STORE", str(_STATE_DIR / "vllm-benchmarks.json")))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _BENCH_RESULTS = []
 _LAST_PROMPT_RESULT = None
 _LOAD_TIMELINE = {}
+
+try:
+    if _BENCH_STORE.is_file():
+        data = json.loads(_BENCH_STORE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            _BENCH_RESULTS.extend(x for x in data if isinstance(x, dict))
+except Exception:
+    pass
 
 try:
     _VLLM_VERSION = package_version("vllm")
@@ -71,6 +82,23 @@ class VllmPromptCommand(BaseModel):
 class GpuPowerLimitCommand(BaseModel):
     watts: float = Field(ge=1, le=1000)
     gpu: int = Field(default=0, ge=0, le=31)
+
+
+class BenchmarkMetaCommand(BaseModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    selected: bool | None = None
+    comment: str | None = Field(default=None, max_length=500)
+
+
+def _save_bench_results():
+    _BENCH_STORE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _BENCH_STORE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_BENCH_RESULTS[-500:], ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_BENCH_STORE)
+
+
+def _find_bench(run_id):
+    return next((x for x in _BENCH_RESULTS if x.get("run_id") == run_id), None)
 
 
 def _vllm_process():
@@ -571,6 +599,7 @@ def _single_benchmark_report(x):
         "",
         f"Run ID: {x.get('run_id', '-')}",
         f"Timestamp: {x.get('timestamp', '-')}",
+        f"Comment: {x.get('comment') or '-'}",
         "",
         "## Model / runtime",
         f"- Model: {x.get('model') or '-'}",
@@ -613,6 +642,64 @@ def _single_benchmark_report(x):
         "",
     ]
     return "\n".join(lines)
+
+
+@base.app.post("/api/vllm/benchmark/meta")
+def api_vllm_benchmark_meta(cmd: BenchmarkMetaCommand):
+    row = _find_bench(cmd.run_id)
+    if row is None:
+        raise base.HTTPException(status_code=404, detail="benchmark run not found")
+    if cmd.selected is not None:
+        row["selected"] = bool(cmd.selected)
+    if cmd.comment is not None:
+        row["comment"] = cmd.comment.strip()
+    _save_bench_results()
+    return {"ok": True, "run": row}
+
+
+@base.app.post("/api/vllm/git/upload-selected")
+def api_vllm_git_upload_selected():
+    selected = [x for x in _BENCH_RESULTS if x.get("selected")]
+    if not selected:
+        raise base.HTTPException(status_code=400, detail="no benchmark rows selected")
+
+    rel_paths = []
+    stamp = time.strftime("%Y-%m-%d")
+    out_dir = _REPO_ROOT / "benchmarks" / "vllm-selected" / stamp
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for row in selected:
+        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", row.get("model") or "model")
+        safe_run = re.sub(r"[^A-Za-z0-9._-]+", "_", row.get("run_id") or str(int(time.time())))
+        name = f"{safe_model}-{row.get('concurrency','x')}x{row.get('max_tokens','x')}-{safe_run}.md"
+        path = out_dir / name
+        path.write_text(_single_benchmark_report(row), encoding="utf-8")
+        rel_paths.append(str(path.relative_to(_REPO_ROOT)))
+
+    def git(*args, check=True):
+        p = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), *args],
+            capture_output=True, text=True, timeout=60,
+        )
+        if check and p.returncode != 0:
+            raise RuntimeError((p.stderr or p.stdout or "git command failed").strip())
+        return p
+
+    try:
+        git("add", "--", *rel_paths)
+        diff = git("diff", "--cached", "--quiet", check=False)
+        if diff.returncode == 0:
+            return {"ok": True, "message": "Selected reports are already committed; nothing to upload.", "files": rel_paths}
+        commit_msg = f"Add {len(rel_paths)} selected vLLM benchmark report{'s' if len(rel_paths) != 1 else ''}"
+        git("commit", "-m", commit_msg)
+        push = git("push")
+        for row in selected:
+            row["git_uploaded"] = True
+            row["git_uploaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _save_bench_results()
+        return {"ok": True, "message": (push.stdout or push.stderr or "Pushed to Git").strip(), "files": rel_paths}
+    except Exception as e:
+        raise base.HTTPException(status_code=500, detail=f"git upload failed: {e}")
 
 
 @base.app.get("/api/vllm/report/run/{run_id}")
@@ -881,8 +968,11 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "vllm_version": status.get("vllm_version"),
         **_summarize_bench_samples(samples),
     }
+    row.setdefault("selected", False)
+    row.setdefault("comment", "")
     _BENCH_RESULTS.append(row)
-    del _BENCH_RESULTS[:-20]
+    del _BENCH_RESULTS[:-500]
+    _save_bench_results()
     return {"ok": True, "result": row}
 
 
@@ -997,6 +1087,12 @@ def install():
       <span>GPU <b id="benchGpu">—</b></span>
       <span>vLLM <b id="benchVllm">—</b></span>
     </div>
+    <div class="vllm-bench-toolbar">
+      <button class="git-upload-btn" onclick="uploadSelectedBenchmarks()">↑ Upload selected to Git</button>
+      <button onclick="setAllBenchSelection(true)">Select all</button>
+      <button onclick="setAllBenchSelection(false)">Clear</button>
+      <span id="vllmGitMsg" class="muted"></span>
+    </div>
     <div class="vllm-bench-buttons">
       <button onclick="runVllmBench(1)">1</button>
       <button onclick="runVllmBench(4)">4</button>
@@ -1011,7 +1107,7 @@ def install():
     </div>
     <div class="vllm-table-wrap">
       <table class="vllm-table">
-        <thead><tr><th>Concurrent</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th></tr></thead>
+        <thead><tr><th>✓</th><th>Concurrent</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th><th>Comment</th></tr></thead>
         <tbody id="vllmBenchRows"><tr><td colspan="5" class="muted">No UI benchmark runs yet</td></tr></tbody>
       </table>
     </div>
@@ -1030,6 +1126,7 @@ def install():
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini b.ok{color:var(--ok)}.vllm-mini b.warn{color:var(--warn)}.vllm-mini b.bad{color:var(--bad)}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-prompt{width:100%;min-height:120px;resize:vertical;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.vllm-prompt-actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:8px}.vllm-prompt-actions label{font-size:10px;color:#aaa}.vllm-prompt-actions input{display:block;width:100px;margin-top:3px;padding:6px}.vllm-prompt-output{margin:10px 0 0;max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#101010;border:1px solid #303030;border-radius:8px;padding:10px;font-size:11px;line-height:1.4;color:#ddd}
 .vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
+.vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
 .run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -1131,14 +1228,20 @@ async function controlVllm(action){
 
 function renderVllmBench(rows){
  const body=document.getElementById('vllmBenchRows');
- if(!rows||!rows.length){body.innerHTML='<tr><td colspan="10" class="muted">No UI benchmark runs yet</td></tr>';return;}
+ if(!rows||!rows.length){body.innerHTML='<tr><td colspan="12" class="muted">No UI benchmark runs yet</td></tr>';return;}
  body.innerHTML=[...rows].reverse().map(x=>{
    const mq=(x.model||'—')+' / '+(x.quantization||'—');
    const ttft=(x.ttft_avg_s??0).toFixed(3)+' / '+(x.ttft_max_s??0).toFixed(3)+' s';
    const promptRate=(x.prompt_tok_s_approx??0).toFixed(1);
-   const runId=encodeURIComponent(x.run_id||'');
+   const rawId=x.run_id||'';
+   const runId=encodeURIComponent(rawId);
    const actions=x.run_id?'<span class="run-report-actions"><a class="run-dl" title="Download this run report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open this run report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'';
-   return '<tr><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td></tr>';
+   const checked=x.selected?' checked':'';
+   const uploaded=x.git_uploaded?' title="Already uploaded to Git"':'';
+   const comment=(x.comment||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+   const sel=x.run_id?'<input class="bench-select" type="checkbox" data-run-id="'+runId+'" onchange="saveBenchMeta(\''+runId+'\',{selected:this.checked})"'+checked+uploaded+'>':'—';
+   const note=x.run_id?'<input class="bench-comment" value="'+comment+'" placeholder="comment…" onblur="saveBenchMeta(\''+runId+'\',{comment:this.value})">':'';
+   return '<tr><td>'+sel+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
@@ -1260,6 +1363,33 @@ async function refreshVllmLogs(){
 async function toggleVllmLogs(){
  const w=document.getElementById('vllmLogWrap');
  if(w.style.display==='none'){w.style.display='block';await refreshVllmLogs();}else{w.style.display='none';}
+}
+
+async function saveBenchMeta(runId,patch){
+ try{
+  const payload={run_id:decodeURIComponent(runId),...patch};
+  const r=await fetch('/api/vllm/benchmark/meta',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+ }catch(e){vllmGitMsg.textContent='Save error: '+e.message;}
+}
+
+function setAllBenchSelection(value){
+ document.querySelectorAll('.bench-select').forEach(cb=>{
+  if(cb.checked!==value){cb.checked=value;saveBenchMeta(cb.dataset.runId,{selected:value});}
+ });
+}
+
+async function uploadSelectedBenchmarks(){
+ const count=[...document.querySelectorAll('.bench-select:checked')].length;
+ if(!count){vllmGitMsg.textContent='Select at least one result';return;}
+ if(!confirm('Upload '+count+' selected benchmark report'+(count===1?'':'s')+' to Git?'))return;
+ vllmGitMsg.textContent='Uploading '+count+' selected report'+(count===1?'':'s')+'…';
+ try{
+  const r=await fetch('/api/vllm/git/upload-selected',{method:'POST'});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  vllmGitMsg.textContent='Git: '+d.message;
+  await refreshVllm();
+ }catch(e){vllmGitMsg.textContent='Git upload error: '+e.message;}
 }
 
 async function runVllmBench(concurrency){
