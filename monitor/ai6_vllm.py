@@ -876,7 +876,7 @@ def install():
     </div>
     <div class="vllm-table-wrap">
       <table class="vllm-table">
-        <thead><tr><th>Concurrent</th><th>Total tokens</th><th>Wall</th><th>Aggregate</th><th>Per request</th></tr></thead>
+        <thead><tr><th>Concurrent</th><th>Total tokens</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th></tr></thead>
         <tbody id="vllmBenchRows"><tr><td colspan="5" class="muted">No UI benchmark runs yet</td></tr></tbody>
       </table>
     </div>
@@ -995,8 +995,11 @@ async function controlVllm(action){
 
 function renderVllmBench(rows){
  const body=document.getElementById('vllmBenchRows');
- if(!rows||!rows.length){body.innerHTML='<tr><td colspan="5" class="muted">No UI benchmark runs yet</td></tr>';return;}
- body.innerHTML=[...rows].reverse().map(x=>'<tr><td>'+x.concurrency+'</td><td>'+x.total_tokens+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td></tr>').join('');
+ if(!rows||!rows.length){body.innerHTML='<tr><td colspan="6" class="muted">No UI benchmark runs yet</td></tr>';return;}
+ body.innerHTML=[...rows].reverse().map(x=>{
+   const mq=(x.model||'—')+' / '+(x.quantization||'—');
+   return '<tr><td>'+x.concurrency+'</td><td>'+x.total_tokens+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+'</td></tr>';
+ }).join('');
 }
 
 async function refreshVllm(){
