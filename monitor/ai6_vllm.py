@@ -434,6 +434,16 @@ def api_vllm_status():
     return result
 
 
+@base.app.get("/api/vllm/benchmarks")
+def api_vllm_benchmarks():
+    return {
+        "ok": True,
+        "store": str(_BENCH_STORE),
+        "count": len(_BENCH_RESULTS),
+        "benchmarks": list(_BENCH_RESULTS),
+    }
+
+
 @base.app.post("/api/vllm/start")
 def api_vllm_start(cmd: VllmStartCommand):
     result = _start_vllm(cmd)
@@ -982,6 +992,7 @@ def install():
     nav = """<div class="top-tabs">
 <button id="tabMonitorBtn" class="tab-btn active" onclick="showTopTab('monitor')">Monitor</button>
 <button id="tabVllmBtn" class="tab-btn" onclick="showTopTab('vllm')">vLLM</button>
+<button id="tabBenchsBtn" class="tab-btn" onclick="showTopTab('benchs')">Benchs</button>
 </div>
 <div id="monitorTab">"""
     dashboard = dashboard.replace(
@@ -1128,6 +1139,7 @@ def install():
 .vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
 .vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
 .run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
+.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.bench-filter-grid{display:grid;grid-template-columns:repeat(8,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -1139,12 +1151,16 @@ let vllmPrevMetrics=null;
 let vllmPrevTs=null;
 
 function showTopTab(which){
- const mon=document.getElementById('monitorTab'),vl=document.getElementById('vllmTab');
- const mb=document.getElementById('tabMonitorBtn'),vb=document.getElementById('tabVllmBtn');
- const isV=which==='vllm';
- mon.style.display=isV?'none':'block';vl.style.display=isV?'block':'none';
- mb.classList.toggle('active',!isV);vb.classList.toggle('active',isV);
- if(isV){loadVllmModels();refreshGpuPowerLimitInfo();refreshVllm();}
+ const mon=document.getElementById('monitorTab'),vl=document.getElementById('vllmTab'),bh=document.getElementById('benchsTab');
+ const mb=document.getElementById('tabMonitorBtn'),vb=document.getElementById('tabVllmBtn'),bb=document.getElementById('tabBenchsBtn');
+ mon.style.display=which==='monitor'?'block':'none';
+ vl.style.display=which==='vllm'?'block':'none';
+ bh.style.display=which==='benchs'?'block':'none';
+ mb.classList.toggle('active',which==='monitor');
+ vb.classList.toggle('active',which==='vllm');
+ bb.classList.toggle('active',which==='benchs');
+ if(which==='vllm'){loadVllmModels();refreshGpuPowerLimitInfo();refreshVllm();}
+ if(which==='benchs'){loadBenchHistory();}
 }
 
 async function loadVllmModels(){
@@ -1388,8 +1404,109 @@ async function uploadSelectedBenchmarks(){
   const r=await fetch('/api/vllm/git/upload-selected',{method:'POST'});
   const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
   vllmGitMsg.textContent='Git: '+d.message;
+  if(document.getElementById('benchHistoryMsg'))benchHistoryMsg.textContent='Git: '+d.message;
   await refreshVllm();
+  if(document.getElementById('benchsTab')&&document.getElementById('benchsTab').style.display!=='none')await loadBenchHistory();
  }catch(e){vllmGitMsg.textContent='Git upload error: '+e.message;}
+}
+
+let benchHistoryData=[];
+
+function escHtml(v){
+ return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function loadBenchHistory(){
+ benchHistoryMsg.textContent='Loading…';
+ try{
+  const r=await fetch('/api/vllm/benchmarks');const d=await r.json();
+  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  benchHistoryData=d.benchmarks||[];
+  benchStorePath.textContent=d.store||'';
+  benchHistoryCount.textContent=benchHistoryData.length+' runs';
+  benchHistoryMsg.textContent='';
+  renderBenchHistory();
+ }catch(e){benchHistoryMsg.textContent='History error: '+e.message;}
+}
+
+function benchFilters(){
+ return {
+  date:(bfDate.value||'').trim().toLowerCase(),
+  model:(bfModel.value||'').trim().toLowerCase(),
+  quant:(bfQuant.value||'').trim().toLowerCase(),
+  conc:(bfConc.value||'').trim(),
+  pl:(bfPl.value||'').trim(),
+  git:bfGit.value,
+  comment:(bfComment.value||'').trim().toLowerCase(),
+  agg:Number(bfAgg.value||0),
+ };
+}
+
+function filteredBenchHistory(){
+ const f=benchFilters();
+ return benchHistoryData.filter(x=>{
+   const date=(x.timestamp||'').toLowerCase();
+   const model=(x.model||'').toLowerCase();
+   const quant=(x.quantization||'').toLowerCase();
+   const comment=(x.comment||'').toLowerCase();
+   if(f.date&&!date.includes(f.date))return false;
+   if(f.model&&!model.includes(f.model))return false;
+   if(f.quant&&!quant.includes(f.quant))return false;
+   if(f.conc&&String(x.concurrency)!==f.conc)return false;
+   if(f.pl&&String(Math.round(x.gpu_power_limit_w||0))!==f.pl)return false;
+   if(f.git==='yes'&&!x.git_uploaded)return false;
+   if(f.git==='no'&&x.git_uploaded)return false;
+   if(f.comment&&!comment.includes(f.comment))return false;
+   if(f.agg&&Number(x.aggregate_tok_s||0)<f.agg)return false;
+   return true;
+ });
+}
+
+function renderBenchHistory(){
+ const body=document.getElementById('benchHistoryRows');
+ if(!body)return;
+ const rows=filteredBenchHistory().slice().reverse();
+ benchHistoryCount.textContent=rows.length+' shown / '+benchHistoryData.length+' total';
+ if(!rows.length){body.innerHTML='<tr><td colspan="16" class="muted">No matching benchmark rows</td></tr>';return;}
+ body.innerHTML=rows.map(x=>{
+   const rawId=x.run_id||'', runId=encodeURIComponent(rawId);
+   const checked=x.selected?' checked':'';
+   const sel=rawId?'<input class="bench-select history-select" type="checkbox" data-run-id="'+runId+'" onchange="saveBenchMeta(\''+runId+'\',{selected:this.checked})"'+checked+'>':'—';
+   const mq=escHtml((x.model||'—')+' / '+(x.quantization||'—'));
+   const date=escHtml((x.timestamp||'—').replace('T',' ').slice(0,19));
+   const ttft=(x.ttft_avg_s??0).toFixed(3)+' / '+(x.ttft_max_s??0).toFixed(3);
+   const per=(x.per_request_min_tok_s??0).toFixed(2)+'–'+(x.per_request_max_tok_s??0).toFixed(2);
+   const pl=x.gpu_power_limit_w==null?'—':Number(x.gpu_power_limit_w).toFixed(0)+' W';
+   const pwr=(x.gpu_power_avg_w==null?'—':Number(x.gpu_power_avg_w).toFixed(1))+' / '+(x.gpu_power_peak_w==null?'—':Number(x.gpu_power_peak_w).toFixed(1));
+   const temp=x.gpu_temp_peak_c==null?'—':Number(x.gpu_temp_peak_c).toFixed(0)+'°C';
+   const git=x.git_uploaded?'<span class="git-state-ok">✓ Git</span>':'<span class="git-state-no">—</span>';
+   const actions=rawId?'<span class="run-report-actions"><a class="run-dl" title="Download report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'—';
+   const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
+   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+ }).join('');
+}
+
+async function saveHistoryComment(runId,value){
+ await saveBenchMeta(runId,{comment:value});
+ const raw=decodeURIComponent(runId);
+ const row=benchHistoryData.find(x=>x.run_id===raw);
+ if(row)row.comment=value;
+}
+
+function setAllHistorySelection(value){
+ document.querySelectorAll('.history-select').forEach(cb=>{
+  if(cb.checked!==value){cb.checked=value;saveBenchMeta(cb.dataset.runId,{selected:value});}
+ });
+ benchHistoryData.forEach(x=>{
+  const visible=[...document.querySelectorAll('.history-select')].some(cb=>decodeURIComponent(cb.dataset.runId)===x.run_id);
+  if(visible)x.selected=value;
+ });
+}
+
+function clearBenchFilters(){
+ ['bfDate','bfModel','bfQuant','bfConc','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
+ bfGit.value='';
+ renderBenchHistory();
 }
 
 async function runVllmBench(concurrency){
