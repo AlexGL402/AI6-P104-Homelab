@@ -68,6 +68,11 @@ class VllmPromptCommand(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
 
+class GpuPowerLimitCommand(BaseModel):
+    watts: float = Field(ge=1, le=1000)
+    gpu: int = Field(default=0, ge=0, le=31)
+
+
 def _vllm_process():
     candidates = []
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "username"]):
@@ -308,6 +313,75 @@ def _start_vllm(cmd):
         raise base.HTTPException(status_code=409, detail=f"failed to start vLLM: {e}")
     log.close()
     return {"pid": proc.pid, "port": cmd.port, "log": str(log_path), "model": str(model)}
+
+
+def _gpu_power_limits(gpu=0):
+    try:
+        p = subprocess.run(
+            [
+                "nvidia-smi", "-i", str(gpu),
+                "--query-gpu=power.limit,power.default_limit,power.min_limit,power.max_limit",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        if p.returncode != 0:
+            return {}
+        parts = [x.strip() for x in (p.stdout or "").strip().split(",")]
+        if len(parts) < 4:
+            return {}
+        current, default, minimum, maximum = [float(x) for x in parts[:4]]
+        return {
+            "current_w": current,
+            "default_w": default,
+            "min_w": minimum,
+            "max_w": maximum,
+        }
+    except Exception:
+        return {}
+
+
+@base.app.get("/api/gpu/power-limit")
+def api_gpu_power_limit(gpu: int = 0):
+    info = _gpu_power_limits(gpu)
+    if not info:
+        raise base.HTTPException(status_code=503, detail="failed to read GPU power limits")
+    return {"ok": True, "gpu": gpu, **info}
+
+
+@base.app.post("/api/gpu/power-limit")
+def api_set_gpu_power_limit(cmd: GpuPowerLimitCommand):
+    info = _gpu_power_limits(cmd.gpu)
+    if not info:
+        raise base.HTTPException(status_code=503, detail="failed to read GPU power limits")
+    if not (info["min_w"] <= cmd.watts <= info["max_w"]):
+        raise base.HTTPException(
+            status_code=400,
+            detail=f"power limit must be {info['min_w']:.0f}..{info['max_w']:.0f} W",
+        )
+
+    attempts = [
+        ["nvidia-smi", "-i", str(cmd.gpu), "-pl", f"{cmd.watts:.0f}"],
+        ["sudo", "-n", "nvidia-smi", "-i", str(cmd.gpu), "-pl", f"{cmd.watts:.0f}"],
+    ]
+    last_error = ""
+    for args in attempts:
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=5.0)
+            if p.returncode == 0:
+                new_info = _gpu_power_limits(cmd.gpu)
+                return {"ok": True, "gpu": cmd.gpu, **new_info}
+            last_error = (p.stderr or p.stdout or "").strip()
+        except Exception as e:
+            last_error = str(e)
+
+    raise base.HTTPException(
+        status_code=403,
+        detail=(
+            "failed to set power limit: " + (last_error or "permission denied") +
+            ". The monitor user may need passwordless permission for nvidia-smi -pl."
+        ),
+    )
 
 
 @base.app.get("/api/vllm/models")
@@ -705,6 +779,23 @@ def install():
       <label>Context<input id="vllmCtx" type="number" value="4096" min="256"></label>
       <label>GPU memory<input id="vllmMem" type="number" value="0.90" min="0.10" max="0.99" step="0.01"></label>
       <label class="vllm-check"><input id="vllmEager" type="checkbox"> Enforce eager</label>
+      <label>Power limit
+        <div class="vllm-pl-row">
+          <select id="vllmPlPreset" onchange="applyPlPresetToInput()">
+            <option value="130">130 W</option>
+            <option value="140">140 W</option>
+            <option value="150" selected>150 W</option>
+            <option value="165">165 W</option>
+            <option value="184">184 W</option>
+            <option value="200">200 W</option>
+            <option value="220">220 W</option>
+            <option value="custom">Custom</option>
+          </select>
+          <input id="vllmPlCustom" type="number" value="150" min="1" max="1000" step="1">
+          <button type="button" onclick="setGpuPowerLimit()">Set</button>
+        </div>
+        <small id="vllmPlInfo">GPU #0 power limit</small>
+      </label>
     </div>
     <div id="vllmLoadWrap" class="vllm-load-wrap" style="display:none">
       <div class="vllm-load-line"><span id="vllmLoadText">Loading model…</span><span id="vllmLoadPct">0%</span></div>
@@ -796,8 +887,8 @@ def install():
 
     css = r'''
 .top-tabs{display:flex;gap:8px;margin:14px 0 2px}.tab-btn{padding:8px 16px}.tab-btn.active{border-color:#7be495;color:#7be495;background:#172019}
-.vllm-form{display:grid;grid-template-columns:minmax(260px,2fr) repeat(3,minmax(110px,1fr)) minmax(120px,1fr);gap:8px;align-items:end}
-.vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
+.vllm-form{display:grid;grid-template-columns:minmax(250px,2fr) repeat(3,minmax(105px,1fr)) minmax(120px,1fr) minmax(300px,1.5fr);gap:8px;align-items:end}
+.vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
 .vllm-load-wrap{margin-top:10px}.vllm-load-line{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#bbb}.vllm-load-bar{height:9px;background:#2b2b2b;border:1px solid #383838;border-radius:6px;overflow:hidden;margin-top:5px}.vllm-load-fill{height:100%;width:0%;background:#8a8a8a;transition:width .35s ease}.vllm-load-sub{font-size:10px;color:#888;margin-top:4px}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
@@ -820,7 +911,7 @@ function showTopTab(which){
  const isV=which==='vllm';
  mon.style.display=isV?'none':'block';vl.style.display=isV?'block':'none';
  mb.classList.toggle('active',!isV);vb.classList.toggle('active',isV);
- if(isV){loadVllmModels();refreshVllm();}
+ if(isV){loadVllmModels();refreshGpuPowerLimitInfo();refreshVllm();}
 }
 
 async function loadVllmModels(){
@@ -833,6 +924,34 @@ async function loadVllmModels(){
   if(preferred>=0)el.selectedIndex=preferred;
   vllmModelsLoaded=true;
  }catch(e){vllmMsg.textContent='Model list error: '+e;}
+}
+
+function applyPlPresetToInput(){
+ const sel=document.getElementById('vllmPlPreset');
+ const inp=document.getElementById('vllmPlCustom');
+ if(sel.value!=='custom')inp.value=sel.value;
+}
+
+async function refreshGpuPowerLimitInfo(){
+ try{
+  const r=await fetch('/api/gpu/power-limit?gpu=0');const d=await r.json();
+  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  vllmPlInfo.textContent='Current '+d.current_w.toFixed(0)+' W • default '+d.default_w.toFixed(0)+' W • range '+d.min_w.toFixed(0)+'–'+d.max_w.toFixed(0)+' W';
+  vllmPlCustom.min=d.min_w;vllmPlCustom.max=d.max_w;
+ }catch(e){vllmPlInfo.textContent='Power limit info unavailable';}
+}
+
+async function setGpuPowerLimit(){
+ const watts=Number(vllmPlCustom.value);
+ if(!Number.isFinite(watts)){vllmMsg.textContent='Invalid power limit';return;}
+ vllmMsg.textContent='Setting PL '+watts+' W…';
+ try{
+  const r=await fetch('/api/gpu/power-limit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gpu:0,watts:watts})});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  vllmMsg.textContent='GPU PL set to '+d.current_w.toFixed(0)+' W';
+  await refreshGpuPowerLimitInfo();
+  await refreshVllm();
+ }catch(e){vllmMsg.textContent='PL error: '+e.message;}
 }
 
 async function startVllm(){
@@ -989,6 +1108,7 @@ async function runVllmBench(concurrency){
  }catch(e){vllmBenchMsg.textContent='Benchmark error: '+e.message;}
 }
 setInterval(()=>{if(document.getElementById('vllmTab')&&document.getElementById('vllmTab').style.display!=='none')refreshVllm();},2000);
+setInterval(()=>{if(document.getElementById('vllmTab')&&document.getElementById('vllmTab').style.display!=='none')refreshGpuPowerLimitInfo();},10000);
 '''
     dashboard = dashboard.replace(
         "refresh();setInterval(refresh,2000);",
