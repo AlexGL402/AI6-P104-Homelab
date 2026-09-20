@@ -157,3 +157,56 @@ Existing P104 reference from `2026-09-10-summary.md`:
 | Huanan / Windows | 1× P104-100 8 GB | Gen1 x4 | 217.63 | 28.17 |
 | AI6 / Ubuntu | 1× P104-100 8 GB | Gen1 x1 | 144.09 | 23.74 |
 
+
+
+## Qwen3.5 9B — Ollama single-GPU benchmark
+
+Model:
+
+```text
+qwen3.5:9b
+```
+
+Ollama residency during the test:
+
+```text
+100% GPU
+Context: 4096
+```
+
+Observed VRAM residency while loaded was about 6.37 GiB idle and about 7.05 GiB during generation. The card reached about 124 W during generation with the 150 W power limit.
+
+Benchmark request:
+
+```text
+Write a Python function that recursively scans a directory, calculates SHA256 for every file, skips symlinks, handles permission errors, and returns a dict sorted by path. Include type hints and a short explanation.
+```
+
+Options:
+
+```text
+temperature = 0
+num_ctx = 4096
+num_predict = 512
+```
+
+Measured result:
+
+```text
+prompt tokens : 54
+output tokens : 512
+prompt speed  : 205.11 tok/s
+generation    : 45.42 tok/s
+total time    : 31.753 s
+```
+
+### Direct reference against saved P104-100 x4 result
+
+| GPU | PCIe | Prompt tok/s | Generation tok/s |
+|---|---|---:|---:|
+| CMP 40HX 8 GB | Gen1 x4 | 205.11 | 45.42 |
+| P104-100 8 GB | Gen1 x4 | 217.63 | 28.17 |
+
+On this test, CMP 40HX prompt processing is about 5.8% lower than the saved P104 x4 result, while generation is about 61.2% higher (1.61x). The model is fully GPU-resident according to `ollama ps`, making this a much more representative GPU comparison than the partially-offloaded Qwen3 14B test.
+
+This result was captured before any capacitor / board-level modification.
