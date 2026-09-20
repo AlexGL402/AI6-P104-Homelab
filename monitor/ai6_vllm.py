@@ -626,6 +626,69 @@ def api_vllm_logs():
     return {"ok": True, "path": str(log_path), "log": text}
 
 
+def _system_cuda_info():
+    driver = None
+    cuda = None
+    try:
+        p = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        if p.returncode == 0:
+            vals = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
+            if vals:
+                driver = vals[0]
+    except Exception:
+        pass
+    try:
+        p = subprocess.run(
+            [str(_VLLM_ENV / "bin/python"), "-c",
+             "import torch; print(torch.__version__); print(torch.version.cuda or '')"],
+            capture_output=True, text=True, timeout=5.0,
+        )
+        if p.returncode == 0:
+            lines = [x.strip() for x in (p.stdout or "").splitlines()]
+            torch_ver = lines[0] if lines else ""
+            cuda_ver = lines[1] if len(lines) > 1 else ""
+            cuda = {"torch": torch_ver, "cuda_runtime": cuda_ver}
+    except Exception:
+        pass
+    return {"driver_version": driver, "cuda": cuda or {}}
+
+
+def _pcie_info_for_gpu(index):
+    info = {
+        "index": index,
+        "bus_id": None,
+        "gen_current": None,
+        "width_current": None,
+        "gen_max": None,
+        "width_max": None,
+    }
+    try:
+        p = subprocess.run(
+            [
+                "nvidia-smi", "-i", str(index),
+                "--query-gpu=pci.bus_id,pcie.link.gen.current,pcie.link.width.current,pcie.link.gen.max,pcie.link.width.max",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            parts = [x.strip() for x in p.stdout.strip().split(",")]
+            if len(parts) >= 5:
+                info.update({
+                    "bus_id": parts[0],
+                    "gen_current": int(float(parts[1])) if parts[1] else None,
+                    "width_current": int(float(parts[2])) if parts[2] else None,
+                    "gen_max": int(float(parts[3])) if parts[3] else None,
+                    "width_max": int(float(parts[4])) if parts[4] else None,
+                })
+    except Exception:
+        pass
+    return info
+
+
 def _gpu_config_label(x):
     devices = x.get("gpu_devices") or []
     if devices:
@@ -657,6 +720,9 @@ def _single_benchmark_report(x):
         f"- vLLM: {x.get('vllm_version') or '-'}",
         f"- GPU count: {x.get('gpu_count') or 1}",
         f"- GPU configuration: {_gpu_config_label(x)}",
+        f"- NVIDIA driver: {x.get('driver_version') or '-'}",
+        f"- Torch: {(x.get('cuda') or {}).get('torch') or '-'}",
+        f"- CUDA runtime: {(x.get('cuda') or {}).get('cuda_runtime') or '-'}",
         "",
         "## Request shape",
         f"- Concurrent requests: {x.get('concurrency', '-')}",
@@ -673,6 +739,20 @@ def _single_benchmark_report(x):
         f"- Aggregate output throughput: {x.get('aggregate_tok_s', 0):.2f} tok/s",
         f"- Per-request output throughput: {x.get('per_request_min_tok_s', 0):.2f}-{x.get('per_request_max_tok_s', 0):.2f} tok/s",
         f"- Average decode speed/request: {x.get('decode_avg_tok_s', 0):.2f} tok/s",
+        "",
+        "## PCIe",
+    ]
+    pcie_rows = x.get("pcie") or []
+    if pcie_rows:
+        for p in pcie_rows:
+            lines.append(
+                f"- GPU{p.get('index','?')} bus {p.get('bus_id') or '-'}: "
+                f"Gen{p.get('gen_current') or '?'} x{p.get('width_current') or '?'} current; "
+                f"max Gen{p.get('gen_max') or '?'} x{p.get('width_max') or '?'}"
+            )
+    else:
+        lines.append("- No PCIe data recorded.")
+    lines += [
         "",
         "## Telemetry",
         f"- Average GPU load: {x.get('gpu_load_avg_pct') if x.get('gpu_load_avg_pct') is not None else '-'} %",
@@ -717,8 +797,8 @@ def _combined_benchmark_report(rows):
         "",
         "## Comparison",
         "",
-        "| Date | Model / quant | GPUs | Conc | PL total | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power total | Peak temp | Comment |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Date | Model / quant | GPUs | PCIe | Conc | PL total | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power total | Peak temp | Comment |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for x in rows:
         date = (x.get("timestamp") or "-").replace("T", " ")[:19]
@@ -729,7 +809,9 @@ def _combined_benchmark_report(rows):
         temp = x.get("gpu_temp_peak_c")
         comment = (x.get("comment") or "-").replace("|", "/").replace("\n", " ")
         lines.append(
-            f"| {date} | {model_quant} | {_gpu_config_label(x)} | {x.get('concurrency','-')} | "
+            f"| {date} | {model_quant} | {_gpu_config_label(x)} | "
+            f"{'; '.join('GPU'+str(p.get('index','?'))+':G'+str(p.get('gen_current') or '?')+'x'+str(p.get('width_current') or '?') for p in (x.get('pcie') or [])) or '-'} | "
+            f"{x.get('concurrency','-')} | "
             f"{f'{pl:.0f} W' if isinstance(pl,(int,float)) else '-'} | "
             f"{x.get('prompt_tokens','-')} | {x.get('max_tokens','-')} | "
             f"{x.get('ttft_avg_s',0):.3f}/{x.get('ttft_max_s',0):.3f} s | "
@@ -795,6 +877,7 @@ def _combined_benchmark_report_html(rows):
           <td class="nowrap">{h((x.get("timestamp") or "-").replace("T"," ")[:19])}</td>
           <td><b>{h(x.get("model") or "-")}</b><div class="sub">{h(x.get("quantization") or "-")}</div></td>
           <td>{h(_gpu_config_label(x))}</td>
+          <td>{h("; ".join("GPU"+str(p.get("index","?"))+": G"+str(p.get("gen_current") or "?")+" x"+str(p.get("width_current") or "?") for p in (x.get("pcie") or [])) or "-")}</td>
           <td>{h(x.get("concurrency","-"))}</td>
           <td>{fmt(pl,0)} W</td>
           <td>{h(x.get("prompt_tokens","-"))}</td>
@@ -842,6 +925,10 @@ def _combined_benchmark_report_html(rows):
           <div class="detail-grid">
             <div><span>Run ID</span><b>{h(x.get("run_id") or "-")}</b></div>
             <div><span>GPUs</span><b>{h(_gpu_config_label(x))}</b></div>
+            <div><span>Driver</span><b>{h(x.get("driver_version") or "-")}</b></div>
+            <div><span>CUDA runtime</span><b>{h((x.get("cuda") or {}).get("cuda_runtime") or "-")}</b></div>
+            <div><span>Torch</span><b>{h((x.get("cuda") or {}).get("torch") or "-")}</b></div>
+            <div><span>PCIe</span><b>{h("; ".join("GPU"+str(p.get("index","?"))+": G"+str(p.get("gen_current") or "?")+" x"+str(p.get("width_current") or "?") for p in (x.get("pcie") or [])) or "-")}</b></div>
             <div><span>Context</span><b>{h(x.get("context") or "-")}</b></div>
             <div><span>Mode</span><b>{h(x.get("mode") or "-")}</b></div>
             <div><span>Prompt tok/s*</span><b>{fmt(x.get("prompt_tok_s_approx"),2)}</b></div>
@@ -881,7 +968,7 @@ details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);bo
 {highlights}
 <div class="table-wrap"><table>
 <thead><tr>
-<th>#</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>Conc</th><th>PL total</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
+<th>#</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Conc</th><th>PL total</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
 </tr></thead>
 <tbody>{''.join(body_rows)}</tbody>
 </table></div>
@@ -1102,6 +1189,10 @@ def api_vllm_report():
                 f"- Mode: {x.get('mode') or '-'}",
                 f"- vLLM: {x.get('vllm_version') or '-'}",
                 f"- GPUs: {_gpu_config_label(x)}",
+                f"- Driver: {x.get('driver_version') or '-'}",
+                f"- CUDA runtime: {(x.get('cuda') or {}).get('cuda_runtime') or '-'}",
+                f"- Torch: {(x.get('cuda') or {}).get('torch') or '-'}",
+                f"- PCIe: {'; '.join('GPU'+str(p.get('index','?'))+': Gen'+str(p.get('gen_current') or '?')+' x'+str(p.get('width_current') or '?')+' (max Gen'+str(p.get('gen_max') or '?')+' x'+str(p.get('width_max') or '?')+')' for p in (x.get('pcie') or [])) or '-'}",
                 f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
                 f"- Output tokens total: {x.get('output_tokens', '-')}",
                 f"- TTFT average: {x.get('ttft_avg_s', 0):.3f} s",
@@ -1296,6 +1387,8 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "context": status.get("max_model_len"),
         "mode": "eager" if status.get("enforce_eager") else "compiled/graphs",
         "vllm_version": status.get("vllm_version"),
+        **_system_cuda_info(),
+        "pcie": [_pcie_info_for_gpu(i) for i in (status.get("gpu_ids") or [0])],
         **_summarize_bench_samples(samples, status.get("gpu_ids") or [0]),
     }
     row.setdefault("selected", False)
@@ -1472,6 +1565,7 @@ def install():
       <label>Model<select id="bfModel" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Quant<select id="bfQuant" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Conc<select id="bfConc" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>PCIe<select id="bfPcie" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>GPUs<select id="bfGpus" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>PL<select id="bfPl" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Git
@@ -1489,13 +1583,13 @@ def install():
       <table class="vllm-table bench-history-table">
         <thead>
           <tr>
-            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>Conc</th>
+            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Conc</th>
             <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
             <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
             <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
           </tr>
         </thead>
-        <tbody id="benchHistoryRows"><tr><td colspan="17" class="muted">Loading benchmark history…</td></tr></tbody>
+        <tbody id="benchHistoryRows"><tr><td colspan="18" class="muted">Loading benchmark history…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1515,7 +1609,7 @@ def install():
 .vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
 .vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
 .run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
-.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.delete-selected-btn{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}.combined-report-actions{display:inline-flex;gap:5px;margin-left:2px}.combined-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;text-decoration:none;font-weight:900;font-size:15px;border:1px solid #3a3a3a}.combined-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.combined-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.bench-filter-grid{display:grid;grid-template-columns:repeat(8,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
+.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.delete-selected-btn{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}.combined-report-actions{display:inline-flex;gap:5px;margin-left:2px}.combined-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;text-decoration:none;font-weight:900;font-size:15px;border:1px solid #3a3a3a}.combined-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.combined-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.bench-filter-grid{display:grid;grid-template-columns:repeat(9,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -1896,6 +1990,7 @@ function populateBenchFilters(){
  setFilterOptions('bfModel',benchHistoryData.map(x=>x.model||''));
  setFilterOptions('bfQuant',benchHistoryData.map(x=>x.quantization||''));
  setFilterOptions('bfConc',benchHistoryData.map(x=>String(x.concurrency??'')));
+ setFilterOptions('bfPcie',benchHistoryData.map(x=>(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ')));
  setFilterOptions('bfGpus',benchHistoryData.map(x=>_benchGpuLabel(x)));
  setFilterOptions('bfPl',benchHistoryData.map(x=>x.gpu_power_limit_w==null?'':String(Math.round(x.gpu_power_limit_w))));
 }
@@ -1906,6 +2001,7 @@ function benchFilters(){
   model:(bfModel.value||'').trim().toLowerCase(),
   quant:(bfQuant.value||'').trim().toLowerCase(),
   conc:(bfConc.value||'').trim(),
+  pcie:(bfPcie.value||'').trim().toLowerCase(),
   gpus:(bfGpus.value||'').trim().toLowerCase(),
   pl:(bfPl.value||'').trim(),
   git:bfGit.value,
@@ -1925,6 +2021,8 @@ function filteredBenchHistory(){
    if(f.model&&model!==f.model)return false;
    if(f.quant&&quant!==f.quant)return false;
    if(f.conc&&String(x.concurrency)!==f.conc)return false;
+   const pcieLabel=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ').toLowerCase();
+   if(f.pcie&&pcieLabel!==f.pcie)return false;
    if(f.gpus&&_benchGpuLabel(x).toLowerCase()!==f.gpus)return false;
    if(f.pl&&String(Math.round(x.gpu_power_limit_w||0))!==f.pl)return false;
    if(f.git==='yes'&&!x.git_uploaded)return false;
@@ -1955,7 +2053,8 @@ function renderBenchHistory(){
    const git=x.git_uploaded?'<span class="git-state-ok">✓ Git</span>':'<span class="git-state-no">—</span>';
    const actions=rawId?'<span class="run-report-actions"><a class="run-dl" title="Download report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'—';
    const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
-   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+   const pcie=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ')||'—';
+   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
@@ -1977,7 +2076,7 @@ function setAllHistorySelection(value){
 }
 
 function clearBenchFilters(){
- ['bfDate','bfModel','bfQuant','bfConc','bfGpus','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
+ ['bfDate','bfModel','bfQuant','bfConc','bfPcie','bfGpus','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
  bfGit.value='';
  renderBenchHistory();
 }
