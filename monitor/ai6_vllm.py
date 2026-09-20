@@ -62,6 +62,7 @@ class VllmStartCommand(BaseModel):
     gpu_memory_utilization: float = Field(default=0.90, ge=0.10, le=0.99)
     enforce_eager: bool = False
     dtype: str = "half"
+    gpu_ids: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=16)
 
 
 class VllmControlCommand(BaseModel):
@@ -243,6 +244,15 @@ def _vllm_status():
     if health_ok and "ready" not in _LOAD_TIMELINE:
         _LOAD_TIMELINE["ready"] = now_mono
 
+    gpu_ids = [0]
+    try:
+        visible = (proc.environ() or {}).get("CUDA_VISIBLE_DEVICES", "")
+        parsed = [int(x.strip()) for x in visible.split(",") if x.strip().isdigit()]
+        if parsed:
+            gpu_ids = parsed
+    except Exception:
+        pass
+
     metrics_text = _http_text(f"http://127.0.0.1:{port}/metrics")
     metrics = {
         "generation_tokens_total": _metric_value(metrics_text, "vllm:generation_tokens_total"),
@@ -267,6 +277,8 @@ def _vllm_status():
         "load_timeline": _load_timeline_summary(),
         "quantization": _model_quantization(model_path),
         "vllm_version": _VLLM_VERSION,
+        "gpu_ids": gpu_ids,
+        "tensor_parallel_size": len(gpu_ids),
     }
 
 
@@ -316,6 +328,14 @@ def _start_vllm(cmd):
     if base.service_ok(cmd.port):
         raise base.HTTPException(status_code=409, detail=f"port {cmd.port} is already in use")
 
+    gpu_stats = base.gpu_stats() or []
+    gpu_ids = sorted(dict.fromkeys(int(x) for x in cmd.gpu_ids))
+    if not gpu_ids:
+        raise base.HTTPException(status_code=400, detail="select at least one GPU")
+    invalid = [i for i in gpu_ids if i < 0 or i >= len(gpu_stats)]
+    if invalid:
+        raise base.HTTPException(status_code=400, detail=f"invalid GPU indices: {invalid}")
+
     args = [
         str(_VLLM_BIN), "serve", str(model),
         "--host", "0.0.0.0",
@@ -323,6 +343,7 @@ def _start_vllm(cmd):
         "--dtype", cmd.dtype,
         "--gpu-memory-utilization", f"{cmd.gpu_memory_utilization:.3f}",
         "--max-model-len", str(cmd.max_model_len),
+        "--tensor-parallel-size", str(len(gpu_ids)),
     ]
     if cmd.enforce_eager:
         args.append("--enforce-eager")
@@ -334,7 +355,7 @@ def _start_vllm(cmd):
         proc = subprocess.Popen(
             args,
             cwd=str(Path.home()),
-            env=os.environ.copy(),
+            env={**os.environ.copy(), "CUDA_VISIBLE_DEVICES": ",".join(str(i) for i in gpu_ids)},
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -344,7 +365,7 @@ def _start_vllm(cmd):
         log.close()
         raise base.HTTPException(status_code=409, detail=f"failed to start vLLM: {e}")
     log.close()
-    return {"pid": proc.pid, "port": cmd.port, "log": str(log_path), "model": str(model)}
+    return {"pid": proc.pid, "port": cmd.port, "log": str(log_path), "model": str(model), "gpu_ids": gpu_ids, "tensor_parallel_size": len(gpu_ids)}
 
 
 def _gpu_power_limits(gpu=0):
@@ -474,6 +495,7 @@ def api_vllm_control(cmd: VllmControlCommand):
         max_model_len=status.get("max_model_len") or 4096,
         gpu_memory_utilization=status.get("gpu_memory_utilization") or 0.90,
         enforce_eager=bool(status.get("enforce_eager")),
+        gpu_ids=status.get("gpu_ids") or [0],
     )
     _stop_vllm()
     time.sleep(0.5)
@@ -604,6 +626,18 @@ def api_vllm_logs():
     return {"ok": True, "path": str(log_path), "log": text}
 
 
+def _gpu_config_label(x):
+    devices = x.get("gpu_devices") or []
+    if devices:
+        return " + ".join(
+            f"GPU{g.get('index','?')} {g.get('name') or 'GPU'}"
+            for g in devices
+        )
+    count = x.get("gpu_count") or 1
+    ids = x.get("gpu_ids") or [0]
+    return f"{count} GPU(s): " + ", ".join(f"GPU{i}" for i in ids)
+
+
 def _single_benchmark_report(x):
     eff = None
     if x.get("gpu_power_avg_w") and x.get("aggregate_tok_s"):
@@ -621,6 +655,8 @@ def _single_benchmark_report(x):
         f"- Context: {x.get('context') or '-'}",
         f"- Mode: {x.get('mode') or '-'}",
         f"- vLLM: {x.get('vllm_version') or '-'}",
+        f"- GPU count: {x.get('gpu_count') or 1}",
+        f"- GPU configuration: {_gpu_config_label(x)}",
         "",
         "## Request shape",
         f"- Concurrent requests: {x.get('concurrency', '-')}",
@@ -652,6 +688,19 @@ def _single_benchmark_report(x):
         f"- Efficiency: {eff:.3f} aggregate tok/s/W" if eff is not None else "- Efficiency: -",
         f"- Telemetry samples: {x.get('sample_count', 0)}",
         "",
+        "## Per-GPU telemetry",
+    ]
+    for g in (x.get("gpu_devices") or []):
+        lines += [
+            f"- GPU{g.get('index','?')} {g.get('name') or 'GPU'}: "
+            f"load {g.get('load_avg_pct','-')}/{g.get('load_peak_pct','-')} %, "
+            f"power {g.get('power_avg_w','-')}/{g.get('power_peak_w','-')} W, "
+            f"PL {g.get('power_limit_w','-')} W, "
+            f"VRAM peak {round((g.get('vram_peak_mib') or 0)/1024,2)} GiB, "
+            f"temp {g.get('temp_peak_c','-')} C",
+        ]
+    lines += [
+        "",
         "*Prompt tok/s is approximate: total prompt tokens divided by the slowest TTFT in the batch; TTFT includes queueing and first-token overhead.*",
         "",
     ]
@@ -668,8 +717,8 @@ def _combined_benchmark_report(rows):
         "",
         "## Comparison",
         "",
-        "| Date | Model / quant | Conc | PL | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power | Peak temp | Comment |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Date | Model / quant | GPUs | Conc | PL total | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power total | Peak temp | Comment |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for x in rows:
         date = (x.get("timestamp") or "-").replace("T", " ")[:19]
@@ -680,7 +729,7 @@ def _combined_benchmark_report(rows):
         temp = x.get("gpu_temp_peak_c")
         comment = (x.get("comment") or "-").replace("|", "/").replace("\n", " ")
         lines.append(
-            f"| {date} | {model_quant} | {x.get('concurrency','-')} | "
+            f"| {date} | {model_quant} | {_gpu_config_label(x)} | {x.get('concurrency','-')} | "
             f"{f'{pl:.0f} W' if isinstance(pl,(int,float)) else '-'} | "
             f"{x.get('prompt_tokens','-')} | {x.get('max_tokens','-')} | "
             f"{x.get('ttft_avg_s',0):.3f}/{x.get('ttft_max_s',0):.3f} s | "
@@ -745,6 +794,7 @@ def _combined_benchmark_report_html(rows):
           <td>{i}</td>
           <td class="nowrap">{h((x.get("timestamp") or "-").replace("T"," ")[:19])}</td>
           <td><b>{h(x.get("model") or "-")}</b><div class="sub">{h(x.get("quantization") or "-")}</div></td>
+          <td>{h(_gpu_config_label(x))}</td>
           <td>{h(x.get("concurrency","-"))}</td>
           <td>{fmt(pl,0)} W</td>
           <td>{h(x.get("prompt_tokens","-"))}</td>
@@ -791,6 +841,7 @@ def _combined_benchmark_report_html(rows):
           <summary>Run {i}: {h(x.get("model") or "-")} / {h(x.get("quantization") or "-")} — {h(x.get("concurrency","-"))} × {h(x.get("max_tokens","-"))}</summary>
           <div class="detail-grid">
             <div><span>Run ID</span><b>{h(x.get("run_id") or "-")}</b></div>
+            <div><span>GPUs</span><b>{h(_gpu_config_label(x))}</b></div>
             <div><span>Context</span><b>{h(x.get("context") or "-")}</b></div>
             <div><span>Mode</span><b>{h(x.get("mode") or "-")}</b></div>
             <div><span>Prompt tok/s*</span><b>{fmt(x.get("prompt_tok_s_approx"),2)}</b></div>
@@ -830,7 +881,7 @@ details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);bo
 {highlights}
 <div class="table-wrap"><table>
 <thead><tr>
-<th>#</th><th>Date</th><th>Model / quant</th><th>Conc</th><th>PL</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
+<th>#</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>Conc</th><th>PL total</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
 </tr></thead>
 <tbody>{''.join(body_rows)}</tbody>
 </table></div>
@@ -942,7 +993,8 @@ def api_vllm_run_report(run_id: str, download: int = 0):
 def api_vllm_report():
     status = _vllm_status()
     stats = base.collect_stats()
-    gpu = ((stats.get("gpu") or {}).get("devices") or [None])[0] or {}
+    gpu_devices = ((stats.get("gpu") or {}).get("devices") or [])
+    gpu = (gpu_devices or [None])[0] or {}
     lines = [
         "# AI6 vLLM report",
         "",
@@ -997,12 +1049,17 @@ def api_vllm_report():
         "## Host / GPU snapshot",
         f"- CPU: {(stats.get('cpu') or {}).get('usage_pct', '-')} %",
         f"- RAM: {(stats.get('memory') or {}).get('usage_pct', '-')} %",
-        f"- GPU: {gpu.get('name', '-')}",
-        f"- GPU load: {gpu.get('utilization_pct', '-')} %",
-        f"- GPU power: {gpu.get('power_w', '-')} W / limit {gpu.get('power_limit_w', '-')} W",
-        f"- VRAM: {gpu.get('memory_used_mib', '-')} MiB / {gpu.get('memory_total_mib', '-')} MiB",
-        f"- GPU temp: {gpu.get('temperature_c', '-')} C",
-        f"- Fan: {gpu.get('fan_pct', '-')} %",
+        f"- GPU count: {len(gpu_devices)}",
+        f"- vLLM selected GPUs: {', '.join('GPU'+str(i) for i in (status.get('gpu_ids') or [0]))}",
+    ]
+    for i, g in enumerate(gpu_devices):
+        lines.append(
+            f"- GPU{i} {g.get('name','-')}: load {g.get('utilization_pct','-')} %, "
+            f"power {g.get('power_w','-')} W / PL {g.get('power_limit_w','-')} W, "
+            f"VRAM {g.get('memory_used_mib','-')}/{g.get('memory_total_mib','-')} MiB, "
+            f"temp {g.get('temperature_c','-')} C, fan {g.get('fan_pct','-')} %"
+        )
+    lines += [
         "",
         "## UI benchmark results",
         "",
@@ -1044,6 +1101,7 @@ def api_vllm_report():
                 f"- Context: {x.get('context') or '-'}",
                 f"- Mode: {x.get('mode') or '-'}",
                 f"- vLLM: {x.get('vllm_version') or '-'}",
+                f"- GPUs: {_gpu_config_label(x)}",
                 f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
                 f"- Output tokens total: {x.get('output_tokens', '-')}",
                 f"- TTFT average: {x.get('ttft_avg_s', 0):.3f} s",
@@ -1085,14 +1143,22 @@ def api_vllm_report():
 def _bench_sample():
     try:
         stats = base.collect_stats()
-        gpu = ((stats.get("gpu") or {}).get("devices") or [None])[0] or {}
+        devices = ((stats.get("gpu") or {}).get("devices") or [])
         return {
-            "gpu_load_pct": gpu.get("utilization_pct"),
-            "gpu_power_w": gpu.get("power_w"),
-            "gpu_power_limit_w": gpu.get("power_limit_w"),
-            "gpu_vram_used_mib": gpu.get("memory_used_mib"),
-            "gpu_temp_c": gpu.get("temperature_c"),
-            "gpu_fan_pct": gpu.get("fan_pct"),
+            "gpus": [
+                {
+                    "index": i,
+                    "name": g.get("name"),
+                    "gpu_load_pct": g.get("utilization_pct"),
+                    "gpu_power_w": g.get("power_w"),
+                    "gpu_power_limit_w": g.get("power_limit_w"),
+                    "gpu_vram_used_mib": g.get("memory_used_mib"),
+                    "gpu_vram_total_mib": g.get("memory_total_mib"),
+                    "gpu_temp_c": g.get("temperature_c"),
+                    "gpu_fan_pct": g.get("fan_pct"),
+                }
+                for i, g in enumerate(devices)
+            ],
             "cpu_pct": (stats.get("cpu") or {}).get("usage_pct"),
             "ram_pct": (stats.get("memory") or {}).get("usage_pct"),
         }
@@ -1100,7 +1166,9 @@ def _bench_sample():
         return {}
 
 
-def _summarize_bench_samples(samples):
+def _summarize_bench_samples(samples, gpu_ids=None):
+    gpu_ids = list(gpu_ids or [0])
+
     def vals(key):
         out = []
         for s in samples:
@@ -1109,25 +1177,65 @@ def _summarize_bench_samples(samples):
                 out.append(float(v))
         return out
 
-    def avg(key):
-        x = vals(key)
-        return round(sum(x) / len(x), 2) if x else None
+    def avg_list(items):
+        return round(sum(items) / len(items), 2) if items else None
 
-    def peak(key):
-        x = vals(key)
-        return round(max(x), 2) if x else None
+    def peak_list(items):
+        return round(max(items), 2) if items else None
+
+    gpu_rows = []
+    for gpu_id in gpu_ids:
+        per = []
+        for s in samples:
+            g = next((x for x in (s.get("gpus") or []) if x.get("index") == gpu_id), None)
+            if g:
+                per.append(g)
+        def gv(key):
+            return [float(x[key]) for x in per if isinstance(x.get(key), (int, float))]
+        first = per[0] if per else {}
+        gpu_rows.append({
+            "index": gpu_id,
+            "name": first.get("name"),
+            "load_avg_pct": avg_list(gv("gpu_load_pct")),
+            "load_peak_pct": peak_list(gv("gpu_load_pct")),
+            "power_avg_w": avg_list(gv("gpu_power_w")),
+            "power_peak_w": peak_list(gv("gpu_power_w")),
+            "power_limit_w": peak_list(gv("gpu_power_limit_w")),
+            "vram_peak_mib": peak_list(gv("gpu_vram_used_mib")),
+            "vram_total_mib": peak_list(gv("gpu_vram_total_mib")),
+            "temp_peak_c": peak_list(gv("gpu_temp_c")),
+            "fan_peak_pct": peak_list(gv("gpu_fan_pct")),
+        })
+
+    total_power_samples = []
+    total_vram_samples = []
+    mean_load_samples = []
+    max_temp_samples = []
+    for s in samples:
+        gs = [g for g in (s.get("gpus") or []) if g.get("index") in gpu_ids]
+        powers = [float(g["gpu_power_w"]) for g in gs if isinstance(g.get("gpu_power_w"), (int,float))]
+        vrams = [float(g["gpu_vram_used_mib"]) for g in gs if isinstance(g.get("gpu_vram_used_mib"), (int,float))]
+        loads = [float(g["gpu_load_pct"]) for g in gs if isinstance(g.get("gpu_load_pct"), (int,float))]
+        temps = [float(g["gpu_temp_c"]) for g in gs if isinstance(g.get("gpu_temp_c"), (int,float))]
+        if powers: total_power_samples.append(sum(powers))
+        if vrams: total_vram_samples.append(sum(vrams))
+        if loads: mean_load_samples.append(sum(loads) / len(loads))
+        if temps: max_temp_samples.append(max(temps))
 
     return {
-        "gpu_load_avg_pct": avg("gpu_load_pct"),
-        "gpu_load_peak_pct": peak("gpu_load_pct"),
-        "gpu_power_avg_w": avg("gpu_power_w"),
-        "gpu_power_peak_w": peak("gpu_power_w"),
-        "gpu_power_limit_w": peak("gpu_power_limit_w"),
-        "gpu_vram_peak_mib": peak("gpu_vram_used_mib"),
-        "gpu_temp_peak_c": peak("gpu_temp_c"),
-        "gpu_fan_peak_pct": peak("gpu_fan_pct"),
-        "cpu_avg_pct": avg("cpu_pct"),
-        "ram_avg_pct": avg("ram_pct"),
+        "gpu_count": len(gpu_ids),
+        "gpu_ids": gpu_ids,
+        "gpu_devices": gpu_rows,
+        "gpu_load_avg_pct": avg_list(mean_load_samples),
+        "gpu_load_peak_pct": peak_list(mean_load_samples),
+        "gpu_power_avg_w": avg_list(total_power_samples),
+        "gpu_power_peak_w": peak_list(total_power_samples),
+        "gpu_power_limit_w": round(sum(x.get("power_limit_w") or 0 for x in gpu_rows), 2) if gpu_rows else None,
+        "gpu_vram_peak_mib": peak_list(total_vram_samples),
+        "gpu_temp_peak_c": peak_list(max_temp_samples),
+        "gpu_fan_peak_pct": peak_list([x.get("fan_peak_pct") for x in gpu_rows if isinstance(x.get("fan_peak_pct"), (int,float))]),
+        "cpu_avg_pct": avg_list(vals("cpu_pct")),
+        "ram_avg_pct": avg_list(vals("ram_pct")),
         "sample_count": len(samples),
     }
 
@@ -1188,7 +1296,7 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "context": status.get("max_model_len"),
         "mode": "eager" if status.get("enforce_eager") else "compiled/graphs",
         "vllm_version": status.get("vllm_version"),
-        **_summarize_bench_samples(samples),
+        **_summarize_bench_samples(samples, status.get("gpu_ids") or [0]),
     }
     row.setdefault("selected", False)
     row.setdefault("comment", "")
@@ -1227,6 +1335,7 @@ def install():
       <label>Context<input id="vllmCtx" type="number" value="4096" min="256"></label>
       <label>GPU memory<input id="vllmMem" type="number" value="0.90" min="0.10" max="0.99" step="0.01"></label>
       <label class="vllm-check"><input id="vllmEager" type="checkbox"> Enforce eager</label>
+      <label>GPUs<div id="vllmGpuSelect" class="vllm-gpu-select"><span class="muted">detecting…</span></div></label>
       <label>Power limit
         <div class="vllm-pl-row">
           <select id="vllmPlPreset" onchange="applyPlPresetToInput()">
@@ -1275,11 +1384,8 @@ def install():
     <div class="vllm-host-strip">
       <div class="vllm-mini">CPU<b id="vllmCpu">—</b><small id="vllmCpuSub">—</small></div>
       <div class="vllm-mini">RAM<b id="vllmRam">—</b><small id="vllmRamSub">—</small></div>
-      <div class="vllm-mini">GPU load<b id="vllmGpuLoad">—</b><small id="vllmGpuName">—</small></div>
-      <div class="vllm-mini">GPU power<b id="vllmGpuPower">—</b><small id="vllmGpuPowerSub">—</small></div>
-      <div class="vllm-mini">VRAM<b id="vllmGpuVram">—</b><small id="vllmGpuVramSub">—</small></div>
-      <div class="vllm-mini">GPU temp<b id="vllmGpuTemp">—</b><small id="vllmGpuFan">—</small></div>
     </div>
+    <div id="vllmGpuGrid" class="vllm-gpu-grid"></div>
   </div>
 
   <div class="section">
@@ -1307,7 +1413,7 @@ def install():
       <span>Context <b id="benchCtx">—</b></span>
       <span>Mode <b id="benchMode">—</b></span>
       <span>PL <b id="benchPl">—</b></span>
-      <span>GPU <b id="benchGpu">—</b></span>
+      <span>GPUs <b id="benchGpu">—</b></span>
       <span>vLLM <b id="benchVllm">—</b></span>
     </div>
     <div class="vllm-bench-toolbar">
@@ -1366,6 +1472,7 @@ def install():
       <label>Model<select id="bfModel" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Quant<select id="bfQuant" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Conc<select id="bfConc" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>GPUs<select id="bfGpus" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>PL<select id="bfPl" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Git
         <select id="bfGit" onchange="renderBenchHistory()">
@@ -1382,13 +1489,13 @@ def install():
       <table class="vllm-table bench-history-table">
         <thead>
           <tr>
-            <th>✓</th><th>Date</th><th>Model / quant</th><th>Conc</th>
+            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>Conc</th>
             <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
             <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
             <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
           </tr>
         </thead>
-        <tbody id="benchHistoryRows"><tr><td colspan="16" class="muted">Loading benchmark history…</td></tr></tbody>
+        <tbody id="benchHistoryRows"><tr><td colspan="17" class="muted">Loading benchmark history…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1399,7 +1506,7 @@ def install():
     css = r'''
 .top-tabs{display:flex;gap:8px;margin:14px 0 2px}.tab-btn{padding:8px 16px}.tab-btn.active{border-color:#7be495;color:#7be495;background:#172019}
 .vllm-form{display:grid;grid-template-columns:minmax(250px,2fr) repeat(3,minmax(105px,1fr)) minmax(120px,1fr) minmax(300px,1.5fr);gap:8px;align-items:end}
-.vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-model-row{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px;align-items:end}.vllm-model-row button{height:32px;padding:0}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
+.vllm-form label{font-size:11px;color:#aaa}.vllm-gpu-select{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}.vllm-gpu-choice{display:flex!important;align-items:center;gap:3px;background:#151515;border:1px solid #333;border-radius:6px;padding:5px 7px!important;color:#ddd!important;font-size:10px!important}.vllm-gpu-choice input{width:auto!important;margin:0!important}.vllm-gpu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px;margin-top:8px}.vllm-gpu-card{background:#171717;border:1px solid #303030;border-radius:9px;padding:9px}.vllm-gpu-card-head{display:flex;justify-content:space-between;gap:8px}.vllm-gpu-card-head b{font-size:12px}.vllm-gpu-card-head span{font-size:10px;color:#999}.vllm-gpu-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:7px}.vllm-gpu-stats div{font-size:9px;color:#999}.vllm-gpu-stats b{display:block;color:#eee;font-size:13px}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-model-row{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px;align-items:end}.vllm-model-row button{height:32px;padding:0}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
 .vllm-load-wrap{margin-top:10px}.vllm-load-line{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#bbb}.vllm-load-bar{height:9px;background:#2b2b2b;border:1px solid #383838;border-radius:6px;overflow:hidden;margin-top:5px}.vllm-load-fill{height:100%;width:0%;background:#8a8a8a;transition:width .35s ease}.vllm-load-sub{font-size:10px;color:#888;margin-top:4px}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
@@ -1430,6 +1537,39 @@ function showTopTab(which){
  bb.classList.toggle('active',which==='benchs');
  if(which==='vllm'){loadVllmModels();refreshGpuPowerLimitInfo();refreshVllm();}
  if(which==='benchs'){loadBenchHistory();}
+}
+
+function selectedVllmGpuIds(){
+ return [...document.querySelectorAll('.vllm-gpu-choice input:checked')].map(x=>Number(x.value)).filter(Number.isFinite);
+}
+
+function renderGpuSelector(devices,runningIds){
+ const box=document.getElementById('vllmGpuSelect');
+ if(!box)return;
+ const current=selectedVllmGpuIds();
+ const selected=current.length?current:(runningIds&&runningIds.length?runningIds:[0]);
+ box.innerHTML=(devices||[]).map((g,i)=>{
+   const checked=selected.includes(i)?' checked':'';
+   return '<label class="vllm-gpu-choice"><input type="checkbox" value="'+i+'"'+checked+'>#'+i+' '+escHtml(g.name||'GPU')+'</label>';
+ }).join('')||'<span class="muted">No GPUs</span>';
+}
+
+function renderVllmGpuGrid(devices,selectedIds){
+ const grid=document.getElementById('vllmGpuGrid');
+ if(!grid)return;
+ grid.innerHTML=(devices||[]).map((g,i)=>{
+   const selected=(selectedIds||[]).includes(i);
+   const load=g.utilization_pct??0, temp=g.temperature_c, used=(g.memory_used_mib||0)/1024,total=(g.memory_total_mib||0)/1024;
+   const tempClass=temp==null?'':cls(temp);
+   return '<div class="vllm-gpu-card'+(selected?' selected':'')+'">'+
+     '<div class="vllm-gpu-card-head"><b>#'+i+' '+escHtml(g.name||'GPU')+'</b><span>'+(selected?'vLLM selected':'available')+'</span></div>'+
+     '<div class="vllm-gpu-stats">'+
+       '<div>Load<b>'+load+'%</b></div>'+
+       '<div>Power<b>'+(g.power_w??'?')+' W</b><span> / '+(g.power_limit_w??'?')+' W</span></div>'+
+       '<div>VRAM<b>'+used.toFixed(2)+' / '+total.toFixed(2)+' GiB</b></div>'+
+       '<div>Temp<b class="'+tempClass+'">'+(temp??'?')+'°C</b><span> fan '+(g.fan_pct??'?')+'%</span></div>'+
+     '</div></div>';
+ }).join('');
 }
 
 async function loadVllmModels(force=false){
@@ -1491,7 +1631,8 @@ async function setGpuPowerLimit(){
 async function startVllm(){
  await loadVllmModels();
  const model=vllmModel.value;if(!model){vllmMsg.textContent='No vLLM model found';return;}
- const payload={model:model,port:Number(vllmPort.value),max_model_len:Number(vllmCtx.value),gpu_memory_utilization:Number(vllmMem.value),enforce_eager:vllmEager.checked,dtype:'half'};
+ const gpu_ids=selectedVllmGpuIds();if(!gpu_ids.length){vllmMsg.textContent='Select at least one GPU';return;}
+ const payload={model:model,port:Number(vllmPort.value),max_model_len:Number(vllmCtx.value),gpu_memory_utilization:Number(vllmMem.value),enforce_eager:vllmEager.checked,dtype:'half',gpu_ids:gpu_ids};
  vllmMsg.textContent='Starting vLLM…';
  try{
   const r=await fetch('/api/vllm/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1503,7 +1644,8 @@ async function startVllm(){
 async function applyRestartVllm(){
  await loadVllmModels();
  const model=vllmModel.value;if(!model){vllmMsg.textContent='No vLLM model selected';return;}
- const payload={model:model,port:Number(vllmPort.value),max_model_len:Number(vllmCtx.value),gpu_memory_utilization:Number(vllmMem.value),enforce_eager:vllmEager.checked,dtype:'half'};
+ const gpu_ids=selectedVllmGpuIds();if(!gpu_ids.length){vllmMsg.textContent='Select at least one GPU';return;}
+ const payload={model:model,port:Number(vllmPort.value),max_model_len:Number(vllmCtx.value),gpu_memory_utilization:Number(vllmMem.value),enforce_eager:vllmEager.checked,dtype:'half',gpu_ids:gpu_ids};
  if(!confirm('Restart vLLM and load '+vllmModel.options[vllmModel.selectedIndex].text+'?'))return;
  vllmMsg.textContent='Stopping current vLLM…';
  try{
@@ -1606,28 +1748,13 @@ async function refreshVllm(){
     vllmRam.textContent=ramPct.toFixed(1)+'%';
     vllmRam.className=ramPct>=90?'bad':ramPct>=75?'warn':'ok';
     vllmRamSub.textContent=(h.memory.used_bytes/1073741824).toFixed(2)+' / '+(h.memory.total_bytes/1073741824).toFixed(2)+' GiB';
-    const g=(h.gpu.devices||[])[0];
-    if(g){
-     const gu=g.utilization_pct;
-     vllmGpuLoad.textContent=(gu??'?')+'%';
-     vllmGpuLoad.className=gu==null?'':gu>=90?'ok':gu>=50?'warn':'';
-     vllmGpuName.textContent=g.name||'GPU #0';
-     const gp=g.power_w,gl=g.power_limit_w;
-     vllmGpuPower.textContent=(gp??'?')+' W';
-     const pRatio=(gp!=null&&gl)?gp/gl:0;
-     vllmGpuPower.className=pRatio>=1.0?'bad':pRatio>=0.90?'warn':'ok';
-     vllmGpuPowerSub.textContent='limit '+(gl??'?')+' W';
-     const vmUsed=g.memory_used_mib||0,vmTotal=g.memory_total_mib||0,vmRatio=vmTotal?vmUsed/vmTotal:0;
-     vllmGpuVram.textContent=(vmUsed/1024).toFixed(2)+' GiB';
-     vllmGpuVram.className=vmRatio>=0.95?'bad':vmRatio>=0.85?'warn':'ok';
-     vllmGpuVramSub.textContent='of '+(vmTotal/1024).toFixed(2)+' GiB';
-     const gt=g.temperature_c;
-     vllmGpuTemp.textContent=(gt??'?')+'°C';
-     vllmGpuTemp.className=gt==null?'':cls(gt);
-     vllmGpuFan.textContent=g.fan_pct==null?'fan N/A':'fan '+g.fan_pct+'%';
-     benchPl.textContent=(g.power_limit_w??'?')+' W';
-     benchGpu.textContent=g.name||'GPU #0';
-    }
+    const devices=(h.gpu.devices||[]);
+    renderGpuSelector(devices,s.gpu_ids||[0]);
+    renderVllmGpuGrid(devices,s.gpu_ids||[0]);
+    const selected=(s.gpu_ids||[0]).map(i=>devices[i]).filter(Boolean);
+    const totalPl=selected.reduce((a,g)=>a+(Number(g.power_limit_w)||0),0);
+    benchPl.textContent=selected.length>1?totalPl.toFixed(0)+' W total':((selected[0]&&selected[0].power_limit_w)??'?')+' W';
+    benchGpu.textContent=(s.gpu_ids||[0]).map(i=>'#'+i+' '+((devices[i]&&devices[i].name)||'GPU')).join(' + ');
    }
   }catch(_e){}
  }catch(e){vllmState.textContent='● ERROR';vllmState.className='status error';vllmMsg.textContent='Status error: '+e.message;}
@@ -1747,11 +1874,19 @@ function setFilterOptions(id,values){
  if(unique.map(String).includes(previous))el.value=previous;
 }
 
+function _benchGpuLabel(x){
+ const ds=x.gpu_devices||[];
+ if(ds.length)return ds.map(g=>'#'+g.index+' '+(g.name||'GPU')).join(' + ');
+ const ids=x.gpu_ids||[0];
+ return ids.map(i=>'#'+i).join(' + ');
+}
+
 function populateBenchFilters(){
  setFilterOptions('bfDate',benchHistoryData.map(x=>(x.timestamp||'').slice(0,10)));
  setFilterOptions('bfModel',benchHistoryData.map(x=>x.model||''));
  setFilterOptions('bfQuant',benchHistoryData.map(x=>x.quantization||''));
  setFilterOptions('bfConc',benchHistoryData.map(x=>String(x.concurrency??'')));
+ setFilterOptions('bfGpus',benchHistoryData.map(x=>_benchGpuLabel(x)));
  setFilterOptions('bfPl',benchHistoryData.map(x=>x.gpu_power_limit_w==null?'':String(Math.round(x.gpu_power_limit_w))));
 }
 
@@ -1761,6 +1896,7 @@ function benchFilters(){
   model:(bfModel.value||'').trim().toLowerCase(),
   quant:(bfQuant.value||'').trim().toLowerCase(),
   conc:(bfConc.value||'').trim(),
+  gpus:(bfGpus.value||'').trim().toLowerCase(),
   pl:(bfPl.value||'').trim(),
   git:bfGit.value,
   comment:(bfComment.value||'').trim().toLowerCase(),
@@ -1779,6 +1915,7 @@ function filteredBenchHistory(){
    if(f.model&&model!==f.model)return false;
    if(f.quant&&quant!==f.quant)return false;
    if(f.conc&&String(x.concurrency)!==f.conc)return false;
+   if(f.gpus&&_benchGpuLabel(x).toLowerCase()!==f.gpus)return false;
    if(f.pl&&String(Math.round(x.gpu_power_limit_w||0))!==f.pl)return false;
    if(f.git==='yes'&&!x.git_uploaded)return false;
    if(f.git==='no'&&x.git_uploaded)return false;
@@ -1808,7 +1945,7 @@ function renderBenchHistory(){
    const git=x.git_uploaded?'<span class="git-state-ok">✓ Git</span>':'<span class="git-state-no">—</span>';
    const actions=rawId?'<span class="run-report-actions"><a class="run-dl" title="Download report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'—';
    const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
-   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
@@ -1830,7 +1967,7 @@ function setAllHistorySelection(value){
 }
 
 function clearBenchFilters(){
- ['bfDate','bfModel','bfQuant','bfConc','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
+ ['bfDate','bfModel','bfQuant','bfConc','bfGpus','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
  bfGit.value='';
  renderBenchHistory();
 }
