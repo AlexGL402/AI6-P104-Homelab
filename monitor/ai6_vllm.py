@@ -493,6 +493,11 @@ def install():
       <label>GPU memory<input id="vllmMem" type="number" value="0.90" min="0.10" max="0.99" step="0.01"></label>
       <label class="vllm-check"><input id="vllmEager" type="checkbox"> Enforce eager</label>
     </div>
+    <div id="vllmLoadWrap" class="vllm-load-wrap" style="display:none">
+      <div class="vllm-load-line"><span id="vllmLoadText">Loading model…</span><span id="vllmLoadPct">0%</span></div>
+      <div class="vllm-load-bar"><div id="vllmLoadFill" class="vllm-load-fill"></div></div>
+      <div id="vllmLoadSub" class="vllm-load-sub">Waiting for model initialization…</div>
+    </div>
     <div class="vllm-actions">
       <button onclick="startVllm()">Start</button>
       <button onclick="controlVllm('stop')">Stop</button>
@@ -571,6 +576,7 @@ def install():
 .top-tabs{display:flex;gap:8px;margin:14px 0 2px}.tab-btn{padding:8px 16px}.tab-btn.active{border-color:#7be495;color:#7be495;background:#172019}
 .vllm-form{display:grid;grid-template-columns:minmax(260px,2fr) repeat(3,minmax(110px,1fr)) minmax(120px,1fr);gap:8px;align-items:end}
 .vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
+.vllm-load-wrap{margin-top:10px}.vllm-load-line{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#bbb}.vllm-load-bar{height:9px;background:#2b2b2b;border:1px solid #383838;border-radius:6px;overflow:hidden;margin-top:5px}.vllm-load-fill{height:100%;width:0%;background:#8a8a8a;transition:width .35s ease}.vllm-load-sub{font-size:10px;color:#888;margin-top:4px}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -639,6 +645,25 @@ async function refreshVllm(){
   const r=await fetch('/api/vllm/status');const s=await r.json();if(!r.ok)throw new Error(JSON.stringify(s));
   vllmState.textContent=s.ready?'● READY':s.running?'● LOADING':'● STOPPED';
   vllmState.className='status '+(s.ready?'ready':s.running?'loading':'down');
+  const lw=document.getElementById('vllmLoadWrap');
+  if(s.running&&!s.ready){
+    lw.style.display='block';
+    let pct=10,txt='Starting vLLM…',sub='Process started; waiting for model initialization…';
+    const vramText=(document.getElementById('vllmGpuVram')||{}).textContent||'';
+    const vm=parseFloat(vramText);
+    if(Number.isFinite(vm)){
+      if(vm>0.2){pct=30;txt='Loading weights…';sub='Model weights are being mapped into GPU memory.';}
+      if(vm>2.0){pct=55;txt='Loading model…';sub='Weights loaded partially; preparing runtime and kernels.';}
+      if(vm>5.0){pct=78;txt='Initializing engine…';sub='Model is mostly resident; preparing KV cache / attention kernels.';}
+      if(vm>6.0){pct=90;txt='Warming up…';sub='Final warmup / compilation before the API becomes ready.';}
+    }
+    vllmLoadFill.style.width=pct+'%';vllmLoadPct.textContent=pct+'%';vllmLoadText.textContent=txt;vllmLoadSub.textContent=sub;
+  }else if(s.ready){
+    lw.style.display='block';vllmLoadFill.style.width='100%';vllmLoadPct.textContent='100%';vllmLoadText.textContent='Ready';vllmLoadSub.textContent='Model loaded and API ready.';
+    setTimeout(()=>{if(vllmState.textContent.includes('READY'))lw.style.display='none';},1200);
+  }else{
+    lw.style.display='none';vllmLoadFill.style.width='0%';vllmLoadPct.textContent='0%';
+  }
   vllmPid.textContent=s.pid??'—';vllmLiveModel.textContent=s.model||'—';vllmUptime.textContent=s.running?fmtUptime(s.uptime_s):'—';
   const m=s.metrics||{};vllmRunning.textContent=m.running==null?'—':Math.round(m.running);vllmWaiting.textContent=m.waiting==null?'—':Math.round(m.waiting);
   vllmKv.textContent=m.kv_cache_usage==null?'—':(m.kv_cache_usage*100).toFixed(1)+'%';
