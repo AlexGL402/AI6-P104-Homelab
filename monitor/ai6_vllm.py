@@ -15,7 +15,7 @@ from importlib.metadata import version as package_version, PackageNotFoundError
 
 import psutil
 from pydantic import BaseModel, Field
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 
 import ai6_monitor_dynamic as dynamic
 
@@ -721,6 +721,125 @@ def _combined_benchmark_report(rows):
     return "\n".join(lines)
 
 
+def _combined_benchmark_report_html(rows):
+    import html
+    rows = list(rows)
+
+    def h(v):
+        return html.escape(str(v if v is not None else "-"))
+
+    def fmt(v, digits=2):
+        return f"{float(v):.{digits}f}" if isinstance(v, (int, float)) else "-"
+
+    body_rows = []
+    for i, x in enumerate(rows, 1):
+        pl = x.get("gpu_power_limit_w")
+        avg_p = x.get("gpu_power_avg_w")
+        peak_p = x.get("gpu_power_peak_w")
+        temp = x.get("gpu_temp_peak_c")
+        eff = None
+        if avg_p and x.get("aggregate_tok_s"):
+            eff = float(x["aggregate_tok_s"]) / float(avg_p)
+        body_rows.append(f"""
+        <tr>
+          <td>{i}</td>
+          <td class="nowrap">{h((x.get("timestamp") or "-").replace("T"," ")[:19])}</td>
+          <td><b>{h(x.get("model") or "-")}</b><div class="sub">{h(x.get("quantization") or "-")}</div></td>
+          <td>{h(x.get("concurrency","-"))}</td>
+          <td>{fmt(pl,0)} W</td>
+          <td>{h(x.get("prompt_tokens","-"))}</td>
+          <td>{h(x.get("max_tokens","-"))}</td>
+          <td>{fmt(x.get("ttft_avg_s"),3)} / {fmt(x.get("ttft_max_s"),3)} s</td>
+          <td>{fmt(x.get("wall_s"),3)} s</td>
+          <td class="hot">{fmt(x.get("aggregate_tok_s"),2)} tok/s</td>
+          <td>{fmt(x.get("per_request_min_tok_s"),2)}–{fmt(x.get("per_request_max_tok_s"),2)}</td>
+          <td>{fmt(avg_p,1)} / {fmt(peak_p,1)} W</td>
+          <td>{fmt(temp,0)}°C</td>
+          <td>{fmt(eff,3) if eff is not None else "-"}</td>
+          <td class="comment">{h(x.get("comment") or "-")}</td>
+        </tr>""")
+
+    highlights = ""
+    if rows:
+        best_agg = max(rows, key=lambda x: float(x.get("aggregate_tok_s") or 0))
+        eff_rows = [
+            (x, float(x.get("aggregate_tok_s") or 0) / float(x.get("gpu_power_avg_w") or 1))
+            for x in rows if x.get("gpu_power_avg_w")
+        ]
+        best_eff_html = ""
+        if eff_rows:
+            best_eff, eff = max(eff_rows, key=lambda pair: pair[1])
+            best_eff_html = (
+                f'<div class="card"><span>Best efficiency</span><b>{eff:.3f} tok/s/W</b>'
+                f'<small>{h(best_eff.get("model") or "-")} • conc {h(best_eff.get("concurrency","-"))} • PL {fmt(best_eff.get("gpu_power_limit_w"),0)} W</small></div>'
+            )
+        highlights = (
+            f'<div class="cards">'
+            f'<div class="card"><span>Selected runs</span><b>{len(rows)}</b><small>combined report</small></div>'
+            f'<div class="card"><span>Best aggregate</span><b>{fmt(best_agg.get("aggregate_tok_s"),2)} tok/s</b>'
+            f'<small>{h(best_agg.get("model") or "-")} • conc {h(best_agg.get("concurrency","-"))} • PL {fmt(best_agg.get("gpu_power_limit_w"),0)} W</small></div>'
+            f'{best_eff_html}'
+            f'</div>'
+        )
+
+    detail_sections = []
+    for i, x in enumerate(rows, 1):
+        avg_p = x.get("gpu_power_avg_w")
+        eff = (float(x.get("aggregate_tok_s") or 0) / float(avg_p)) if avg_p else None
+        detail_sections.append(f"""
+        <details>
+          <summary>Run {i}: {h(x.get("model") or "-")} / {h(x.get("quantization") or "-")} — {h(x.get("concurrency","-"))} × {h(x.get("max_tokens","-"))}</summary>
+          <div class="detail-grid">
+            <div><span>Run ID</span><b>{h(x.get("run_id") or "-")}</b></div>
+            <div><span>Context</span><b>{h(x.get("context") or "-")}</b></div>
+            <div><span>Mode</span><b>{h(x.get("mode") or "-")}</b></div>
+            <div><span>Prompt tok/s*</span><b>{fmt(x.get("prompt_tok_s_approx"),2)}</b></div>
+            <div><span>Decode avg/request</span><b>{fmt(x.get("decode_avg_tok_s"),2)} tok/s</b></div>
+            <div><span>GPU load avg/peak</span><b>{fmt(x.get("gpu_load_avg_pct"),1)} / {fmt(x.get("gpu_load_peak_pct"),1)}%</b></div>
+            <div><span>VRAM peak</span><b>{fmt((x.get("gpu_vram_peak_mib") or 0)/1024,2)} GiB</b></div>
+            <div><span>Fan peak</span><b>{fmt(x.get("gpu_fan_peak_pct"),0)}%</b></div>
+            <div><span>CPU avg</span><b>{fmt(x.get("cpu_avg_pct"),1)}%</b></div>
+            <div><span>RAM avg</span><b>{fmt(x.get("ram_avg_pct"),1)}%</b></div>
+            <div><span>Efficiency</span><b>{fmt(eff,3) if eff is not None else "-"} tok/s/W</b></div>
+            <div><span>Comment</span><b>{h(x.get("comment") or "-")}</b></div>
+          </div>
+        </details>""")
+
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AI6 vLLM selected benchmark report</title>
+<style>
+:root{{--bg:#0f0f10;--panel:#18191b;--line:#303236;--text:#ececec;--muted:#9ba0a6;--green:#73e28b;--blue:#79bfff}}
+*{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Arial,sans-serif}}
+.wrap{{max-width:1800px;margin:0 auto;padding:24px}} h1{{margin:0 0 4px;font-size:24px}} .meta{{color:var(--muted);margin-bottom:18px}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:14px 0 18px}}
+.card{{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}} .card span,.card small{{display:block;color:var(--muted)}} .card b{{display:block;font-size:22px;margin:2px 0}}
+.table-wrap{{overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}} table{{border-collapse:collapse;width:100%;min-width:1450px}}
+th,td{{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}} th{{position:sticky;top:0;background:#202226;color:#c9cdd1;font-size:12px;z-index:1}}
+tbody tr:nth-child(even){{background:#141516}} tbody tr:hover{{background:#22252a}} .nowrap{{white-space:nowrap}} .sub{{color:var(--muted);font-size:11px;margin-top:2px}} .hot{{color:var(--green);font-weight:700}} .comment{{min-width:160px;max-width:260px;white-space:normal}}
+details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px}} summary{{cursor:pointer;font-weight:700}}
+.detail-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px}} .detail-grid>div{{background:#121315;border:1px solid #292b2f;border-radius:7px;padding:8px}} .detail-grid span{{display:block;color:var(--muted);font-size:11px}} .detail-grid b{{display:block;margin-top:2px}}
+.note{{color:var(--muted);font-size:12px;margin-top:12px}}
+</style>
+</head>
+<body><div class="wrap">
+<h1>AI6 vLLM selected benchmark report</h1>
+<div class="meta">Generated {h(time.strftime('%Y-%m-%d %H:%M:%S %z'))}</div>
+{highlights}
+<div class="table-wrap"><table>
+<thead><tr>
+<th>#</th><th>Date</th><th>Model / quant</th><th>Conc</th><th>PL</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
+</tr></thead>
+<tbody>{''.join(body_rows)}</tbody>
+</table></div>
+<div class="note">* Prompt tok/s is approximate because TTFT includes queueing and first-token overhead.</div>
+<h2>Run details</h2>
+{''.join(detail_sections)}
+</div></body></html>"""
+
+
 @base.app.post("/api/vllm/benchmark/meta")
 def api_vllm_benchmark_meta(cmd: BenchmarkMetaCommand):
     row = _find_bench(cmd.run_id)
@@ -749,12 +868,15 @@ def api_vllm_selected_report(download: int = 0):
     rows = [x for x in _BENCH_RESULTS if x.get("selected")]
     if not rows:
         raise base.HTTPException(status_code=400, detail="no benchmark rows selected")
-    body = _combined_benchmark_report(rows)
-    headers = {}
     if download:
+        body = _combined_benchmark_report(rows)
         filename = "vllm-selected-" + time.strftime("%Y%m%d-%H%M%S") + ".md"
-        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return PlainTextResponse(body, media_type="text/markdown; charset=utf-8", headers=headers)
+        return PlainTextResponse(
+            body,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    return HTMLResponse(_combined_benchmark_report_html(rows))
 
 
 @base.app.post("/api/vllm/git/upload-selected")
