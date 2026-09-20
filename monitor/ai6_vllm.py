@@ -33,7 +33,15 @@ _LOAD_TIMELINE = {}
 try:
     _VLLM_VERSION = package_version("vllm")
 except PackageNotFoundError:
-    _VLLM_VERSION = "unknown"
+    try:
+        p = subprocess.run(
+            [str(_VLLM_BIN), "--version"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        m = re.search(r"(\d+\.\d+\.\d+(?:[-+._A-Za-z0-9]*)?)", (p.stdout or "") + " " + (p.stderr or ""))
+        _VLLM_VERSION = m.group(1) if m else "unknown"
+    except Exception:
+        _VLLM_VERSION = "unknown"
 
 
 class VllmStartCommand(BaseModel):
@@ -459,6 +467,8 @@ def api_vllm_report():
         f"- Context: {status.get('max_model_len') or '-'}",
         f"- GPU memory utilization: {status.get('gpu_memory_utilization') or '-'}",
         f"- Enforce eager: {bool(status.get('enforce_eager'))}",
+        f"- Quantization: {status.get('quantization') or '-'}",
+        f"- vLLM version: {status.get('vllm_version') or '-'}",
         "",
         "## Startup stages (sampled)",
     ]
@@ -507,18 +517,51 @@ def api_vllm_report():
         "",
         "## UI benchmark results",
         "",
-        "| Concurrent | Output/request | Total tokens | Wall s | Aggregate tok/s | Per-request tok/s |",
-        "|---:|---:|---:|---:|---:|---:|",
+        "| Concurrent | Output/request | Total tokens | Wall s | Aggregate tok/s | Per-request tok/s | Avg GPU load | Avg/peak power | Peak VRAM | Peak temp |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     if _BENCH_RESULTS:
         for x in _BENCH_RESULTS:
             lines.append(
                 f"| {x['concurrency']} | {x['max_tokens']} | {x['total_tokens']} | "
                 f"{x['wall_s']:.3f} | {x['aggregate_tok_s']:.2f} | "
-                f"{x['per_request_min_tok_s']:.2f}-{x['per_request_max_tok_s']:.2f} |"
+                f"{x['per_request_min_tok_s']:.2f}-{x['per_request_max_tok_s']:.2f} | "
+                f"{x.get('gpu_load_avg_pct', '-') if x.get('gpu_load_avg_pct') is not None else '-'}% | "
+                f"{x.get('gpu_power_avg_w', '-') if x.get('gpu_power_avg_w') is not None else '-'} / "
+                f"{x.get('gpu_power_peak_w', '-') if x.get('gpu_power_peak_w') is not None else '-'} W | "
+                f"{round((x.get('gpu_vram_peak_mib') or 0)/1024, 2) if x.get('gpu_vram_peak_mib') is not None else '-'} GiB | "
+                f"{x.get('gpu_temp_peak_c', '-') if x.get('gpu_temp_peak_c') is not None else '-'} C |"
             )
     else:
-        lines.append("| - | - | - | - | - | no UI benchmark runs yet |")
+        lines.append("| - | - | - | - | - | no UI benchmark runs yet | - | - | - | - |")
+    if _BENCH_RESULTS:
+        lines += ["", "## Benchmark telemetry details", ""]
+        for x in _BENCH_RESULTS:
+            eff = None
+            if x.get("gpu_power_avg_w") and x.get("aggregate_tok_s"):
+                eff = x["aggregate_tok_s"] / x["gpu_power_avg_w"]
+            lines += [
+                f"### {x['concurrency']} concurrent × {x['max_tokens']} output tokens",
+                f"- Model: {x.get('model') or '-'}",
+                f"- Quantization: {x.get('quantization') or '-'}",
+                f"- Context: {x.get('context') or '-'}",
+                f"- Mode: {x.get('mode') or '-'}",
+                f"- vLLM: {x.get('vllm_version') or '-'}",
+                f"- Aggregate throughput: {x['aggregate_tok_s']:.2f} tok/s",
+                f"- Average GPU load: {x.get('gpu_load_avg_pct') if x.get('gpu_load_avg_pct') is not None else '-'} %",
+                f"- Peak GPU load: {x.get('gpu_load_peak_pct') if x.get('gpu_load_peak_pct') is not None else '-'} %",
+                f"- Average GPU power: {x.get('gpu_power_avg_w') if x.get('gpu_power_avg_w') is not None else '-'} W",
+                f"- Peak GPU power: {x.get('gpu_power_peak_w') if x.get('gpu_power_peak_w') is not None else '-'} W",
+                f"- Power limit: {x.get('gpu_power_limit_w') if x.get('gpu_power_limit_w') is not None else '-'} W",
+                f"- Peak VRAM: {round((x.get('gpu_vram_peak_mib') or 0)/1024, 2) if x.get('gpu_vram_peak_mib') is not None else '-'} GiB",
+                f"- Peak temperature: {x.get('gpu_temp_peak_c') if x.get('gpu_temp_peak_c') is not None else '-'} C",
+                f"- Peak fan: {x.get('gpu_fan_peak_pct') if x.get('gpu_fan_peak_pct') is not None else '-'} %",
+                f"- Average CPU: {x.get('cpu_avg_pct') if x.get('cpu_avg_pct') is not None else '-'} %",
+                f"- Average RAM: {x.get('ram_avg_pct') if x.get('ram_avg_pct') is not None else '-'} %",
+                f"- Efficiency: {eff:.3f} aggregate tok/s/W" if eff is not None else "- Efficiency: -",
+                f"- Telemetry samples: {x.get('sample_count', 0)}",
+                "",
+            ]
     lines += [
         "",
         "## Paths",
@@ -536,6 +579,56 @@ def api_vllm_report():
     )
 
 
+def _bench_sample():
+    try:
+        stats = base.collect_stats()
+        gpu = ((stats.get("gpu") or {}).get("devices") or [None])[0] or {}
+        return {
+            "gpu_load_pct": gpu.get("utilization_pct"),
+            "gpu_power_w": gpu.get("power_w"),
+            "gpu_power_limit_w": gpu.get("power_limit_w"),
+            "gpu_vram_used_mib": gpu.get("memory_used_mib"),
+            "gpu_temp_c": gpu.get("temperature_c"),
+            "gpu_fan_pct": gpu.get("fan_pct"),
+            "cpu_pct": (stats.get("cpu") or {}).get("usage_pct"),
+            "ram_pct": (stats.get("memory") or {}).get("usage_pct"),
+        }
+    except Exception:
+        return {}
+
+
+def _summarize_bench_samples(samples):
+    def vals(key):
+        out = []
+        for s in samples:
+            v = s.get(key)
+            if isinstance(v, (int, float)):
+                out.append(float(v))
+        return out
+
+    def avg(key):
+        x = vals(key)
+        return round(sum(x) / len(x), 2) if x else None
+
+    def peak(key):
+        x = vals(key)
+        return round(max(x), 2) if x else None
+
+    return {
+        "gpu_load_avg_pct": avg("gpu_load_pct"),
+        "gpu_load_peak_pct": peak("gpu_load_pct"),
+        "gpu_power_avg_w": avg("gpu_power_w"),
+        "gpu_power_peak_w": peak("gpu_power_w"),
+        "gpu_power_limit_w": peak("gpu_power_limit_w"),
+        "gpu_vram_peak_mib": peak("gpu_vram_used_mib"),
+        "gpu_temp_peak_c": peak("gpu_temp_c"),
+        "gpu_fan_peak_pct": peak("gpu_fan_pct"),
+        "cpu_avg_pct": avg("cpu_pct"),
+        "ram_avg_pct": avg("ram_pct"),
+        "sample_count": len(samples),
+    }
+
+
 @base.app.post("/api/vllm/benchmark")
 def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
     status = _vllm_status()
@@ -548,11 +641,17 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         for i in range(1, cmd.concurrency + 1)
     ]
     started = time.perf_counter()
+    samples = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=cmd.concurrency) as pool:
         futures = [
             pool.submit(_bench_one, port, model, prompt, cmd.max_tokens)
             for prompt in prompts
         ]
+        while True:
+            samples.append(_bench_sample())
+            if all(f.done() for f in futures):
+                break
+            time.sleep(0.5)
         results = [f.result() for f in futures]
     wall = time.perf_counter() - started
     total_tokens = sum(x[0] for x in results)
@@ -566,6 +665,12 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "aggregate_tok_s": round(total_tokens / wall, 2) if wall > 0 else 0,
         "per_request_min_tok_s": round(min(per_request), 2) if per_request else 0,
         "per_request_max_tok_s": round(max(per_request), 2) if per_request else 0,
+        "model": Path(status.get("model_path") or status.get("model") or "").name or None,
+        "quantization": status.get("quantization"),
+        "context": status.get("max_model_len"),
+        "mode": "eager" if status.get("enforce_eager") else "compiled/graphs",
+        "vllm_version": status.get("vllm_version"),
+        **_summarize_bench_samples(samples),
     }
     _BENCH_RESULTS.append(row)
     del _BENCH_RESULTS[:-20]
