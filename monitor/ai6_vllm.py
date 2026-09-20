@@ -1124,6 +1124,57 @@ def install():
     </div>
   </div>
 </div>
+
+<div id="benchsTab" style="display:none">
+  <div class="section">
+    <div class="section-head">
+      <div>
+        <div class="section-title">Benchmark History</div>
+        <div class="section-sub">Persistent results from <span id="benchStorePath">~/.local/state/ai6-monitor/vllm-benchmarks.json</span></div>
+      </div>
+      <div id="benchHistoryCount" class="muted">0 runs</div>
+    </div>
+
+    <div class="bench-history-toolbar">
+      <button class="git-upload-btn" onclick="uploadSelectedBenchmarks()">↑ Upload selected to Git</button>
+      <button onclick="setAllHistorySelection(true)">Select visible</button>
+      <button onclick="setAllHistorySelection(false)">Clear visible</button>
+      <button onclick="clearBenchFilters()">Clear filters</button>
+      <span id="benchHistoryMsg" class="muted"></span>
+    </div>
+
+    <div class="bench-filter-grid">
+      <label>Date<input id="bfDate" placeholder="2026-09-20" oninput="renderBenchHistory()"></label>
+      <label>Model<input id="bfModel" placeholder="Qwen3-4B" oninput="renderBenchHistory()"></label>
+      <label>Quant<input id="bfQuant" placeholder="AWQ" oninput="renderBenchHistory()"></label>
+      <label>Conc<input id="bfConc" placeholder="32" oninput="renderBenchHistory()"></label>
+      <label>PL<input id="bfPl" placeholder="150" oninput="renderBenchHistory()"></label>
+      <label>Git
+        <select id="bfGit" onchange="renderBenchHistory()">
+          <option value="">all</option>
+          <option value="yes">uploaded</option>
+          <option value="no">not uploaded</option>
+        </select>
+      </label>
+      <label>Comment<input id="bfComment" placeholder="text…" oninput="renderBenchHistory()"></label>
+      <label>Min agg<input id="bfAgg" placeholder="700" type="number" oninput="renderBenchHistory()"></label>
+    </div>
+
+    <div class="vllm-table-wrap bench-history-wrap">
+      <table class="vllm-table bench-history-table">
+        <thead>
+          <tr>
+            <th>✓</th><th>Date</th><th>Model / quant</th><th>Conc</th>
+            <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
+            <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
+            <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
+          </tr>
+        </thead>
+        <tbody id="benchHistoryRows"><tr><td colspan="16" class="muted">Loading benchmark history…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 '''
     dashboard = dashboard.replace("<script>", vllm_html + "\n<script>", 1)
 
