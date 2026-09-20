@@ -777,7 +777,9 @@ async function refreshVllm(){
      vllmGpuPowerSub.textContent='limit '+(g.power_limit_w??'?')+' W';
      vllmGpuVram.textContent=((g.memory_used_mib||0)/1024).toFixed(2)+' GiB';
      vllmGpuVramSub.textContent='of '+((g.memory_total_mib||0)/1024).toFixed(2)+' GiB';
-     vllmGpuTemp.textContent=(g.temperature_c??'?')+'°C';
+     const gt=g.temperature_c;
+     vllmGpuTemp.textContent=(gt??'?')+'°C';
+     vllmGpuTemp.className=gt==null?'':cls(gt);
      vllmGpuFan.textContent=g.fan_pct==null?'fan N/A':'fan '+g.fan_pct+'%';
     }
    }
