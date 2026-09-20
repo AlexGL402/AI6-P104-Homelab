@@ -102,3 +102,70 @@ Recommended next checkpoints:
 2. Same profile matrix at concurrency 1 and 4 if needed for PL sensitivity.
 3. Repeat the common-model Ollama or llama.cpp comparison when P104 is installed in the same host/PCIe configuration.
 4. When CMP50 cards arrive, repeat the exact vLLM benchmark profiles using the saved prompt hashes and report format.
+
+
+## Long-decode power-limit comparison — 1024 / 2048 output
+
+Additional controlled runs were captured after the output-length sweep using the same workload:
+
+- Model: Qwen3-4B-AWQ
+- Profile: Medium
+- Concurrency: 12
+- Thinking: OFF
+- Temperature: 0
+- Context: 4096
+- PCIe: Gen1 x4
+- Same prompt set / prompt hash for each output length
+
+### 1024 output tokens/request
+
+| PL | Aggregate | Per request | TTFT avg/max | Wall | Avg / peak power | Efficiency | Peak temp |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 130 W | 274.06 tok/s | 22.87–22.89 tok/s | 0.100 / 0.107 s | 44.838 s | 127.63 / 131.61 W | 2.147 tok/s/W | 60 C |
+| 150 W | 270.81 tok/s | 22.70–22.74 tok/s | 1.192 / 1.617 s | 45.374 s | 136.50 / 150.63 W | 1.984 tok/s/W | 54 C |
+| 184 W | 276.48 tok/s | 23.20–23.24 tok/s | 0.099 / 0.103 s | 44.444 s | 142.12 / 157.17 W | 1.945 tok/s/W | 64 C |
+
+The 150 W TTFT result is an isolated outlier relative to the otherwise ~0.1 s TTFT measurements and should not be interpreted as a stable power-limit effect.
+
+Relative to 130 W, the 184 W run improved aggregate throughput by only about 0.9% while reducing energy efficiency.
+
+### 2048 output tokens/request
+
+| PL | Aggregate | Per request | TTFT avg/max | Wall | Avg / peak power | Efficiency | Peak temp |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 130 W | 182.59 tok/s | 15.36–16.48 tok/s | 0.088 / 0.094 s | 133.654 s | 127.43 / 131.48 W | 1.433 tok/s/W | 67 C |
+| 150 W | 183.88 tok/s | 15.45–16.77 tok/s | 0.097 / 0.102 s | 132.982 s | 142.66 / 151.73 W | 1.289 tok/s/W | 70 C |
+| 184 W | 185.09 tok/s | 15.56–16.64 tok/s | 0.219 / 0.251 s | 131.977 s | 145.59 / 172.25 W | 1.271 tok/s/W | 73 C |
+
+Relative to 130 W:
+
+- 150 W adds about 0.7% aggregate throughput.
+- 184 W adds about 1.4% aggregate throughput.
+- Average GPU power rises materially while efficiency drops.
+- Peak temperature rises from 67 C to 73 C.
+
+For this workload, increasing PL above 130 W gives only a very small performance gain even during long decode.
+
+## Pre-mod baseline conclusion
+
+The current pre-capacitor baseline is now sufficiently broad for post-mod comparison:
+
+- Prompt profiles: Short / Medium / Long
+- Concurrency: 1 / 4 / 12
+- Output length: 128 / 512 / 1024 / 2048
+- Power limits: 130 / 150 / 184 W
+- Telemetry: TTFT, aggregate throughput, per-request throughput, power, temperature, VRAM, GPU load and efficiency
+- Runtime/platform metadata captured by the monitor for new runs
+- Deterministic prompt profile IDs and SHA256 prompt hashes
+
+Current practical operating point for Qwen3-4B-AWQ vLLM on this CMP 40HX is **130 W**. Across the heavier 1024/2048 output tests, higher power limits produce only marginal throughput increases while reducing tok/s/W and increasing temperature.
+
+Suggested post-mod control points:
+
+1. Medium / conc 12 / 512 output / 130 W
+2. Medium / conc 12 / 1024 output / 130 W
+3. Medium / conc 12 / 2048 output / 130 W
+4. Medium / conc 12 / 2048 output / 150 W
+5. PearlHash mining / 130 W
+
+If the post-mod results show a repeatable difference larger than normal run-to-run variation, repeat the broader benchmark matrix.
