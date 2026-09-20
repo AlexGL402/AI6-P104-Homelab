@@ -1637,6 +1637,11 @@ def install():
       <div id="benchHistoryCount" class="muted">0 runs</div>
     </div>
 
+    <div id="benchBestCards" class="bench-best-cards">
+      <div class="bench-best-card"><span>Best aggregate</span><b id="benchBestAgg">—</b><small id="benchBestAggSub">visible results</small></div>
+      <div class="bench-best-card"><span>Best efficiency</span><b id="benchBestEff">—</b><small id="benchBestEffSub">visible results</small></div>
+      <div class="bench-best-card"><span>Best balanced</span><b id="benchBestScore">—</b><small id="benchBestScoreSub">visible results</small></div>
+    </div>
     <div class="bench-history-toolbar">
       <button class="git-upload-btn" onclick="uploadSelectedBenchmarks()">↑ Upload selected to Git</button>
       <button onclick="setAllHistorySelection(true)">Select visible</button>
@@ -1649,6 +1654,7 @@ def install():
       </span>
       <span id="benchHistoryMsg" class="muted"></span>
     </div>
+    <div class="section-sub" style="margin:-4px 0 9px">Rating = balanced score inside comparable workload peers (aggregate 35% • per-request 25% • efficiency 20% • TTFT 20%). Recommendations are workload hints, not model-quality scores.</div>
 
     <div class="bench-filter-grid">
       <label>Date<select id="bfDate" onchange="renderBenchHistory()"><option value="">all</option></select></label>
@@ -1680,10 +1686,10 @@ def install():
             <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Think</th><th>Profile</th><th>Prompt hash</th><th>Conc</th>
             <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
             <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
-            <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
+            <th>Temp</th><th>Rating</th><th>Recommended</th><th>Git</th><th>Report</th><th>Comment</th>
           </tr>
         </thead>
-        <tbody id="benchHistoryRows"><tr><td colspan="21" class="muted">Loading benchmark history…</td></tr></tbody>
+        <tbody id="benchHistoryRows"><tr><td colspan="23" class="muted">Loading benchmark history…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1705,7 +1711,9 @@ def install():
 .vllm-bench-config{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin:0 0 10px}.vllm-bench-config label{font-size:10px;color:#999}.vllm-bench-config select,.vllm-bench-config input{display:block;margin-top:3px;padding:6px 8px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}.bench-custom-conc{display:flex;gap:4px}.bench-custom-conc input{width:72px}.bench-custom-conc button{padding:6px 10px}
 .vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
 .run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
+.bench-best-cards{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:8px;margin:10px 0 12px}.bench-best-card{background:#141719;border:1px solid #35523c;border-radius:10px;padding:10px 12px;box-shadow:0 0 0 1px rgba(115,226,139,.05) inset}.bench-best-card span{display:block;color:#9ca3a8;font-size:10px}.bench-best-card b{display:block;color:#7be495;font-size:20px;line-height:1.25;margin:2px 0}.bench-best-card small{color:#7d858b;font-size:9px}.bench-best-card.best-eff{border-color:#6b5a27}.bench-best-card.best-eff b{color:#ffd56a}.bench-best-card.best-score{border-color:#315d7b}.bench-best-card.best-score b{color:#79bfff}
 .bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.delete-selected-btn{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}.combined-report-actions{display:inline-flex;gap:5px;margin-left:2px}.combined-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;text-decoration:none;font-weight:900;font-size:15px;border:1px solid #3a3a3a}.combined-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.combined-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.bench-filter-grid{display:grid;grid-template-columns:repeat(13,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
+.bench-history-table tr.row-best-agg td{background:rgba(61,125,76,.10)}.bench-history-table tr.row-best-eff td{box-shadow:inset 0 1px 0 rgba(255,213,106,.08),inset 0 -1px 0 rgba(255,213,106,.08)}.bench-history-table td.metric-good{color:#7be495;font-weight:700}.bench-history-table td.metric-warn{color:#ffd56a}.bench-history-table td.metric-bad{color:#ff8c8c}.rating-pill{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:3px 7px;font-weight:800;font-size:10px;border:1px solid #3a3a3a}.rating-pill.r-high{color:#7be495;background:#142719;border-color:#326a40}.rating-pill.r-mid{color:#ffd56a;background:#2b2513;border-color:#6e5b21}.rating-pill.r-low{color:#ff9a9a;background:#2b1717;border-color:#6f3030}.rec-badges{display:flex;gap:3px;flex-wrap:wrap;min-width:120px}.rec-tag{display:inline-flex;border-radius:999px;padding:2px 6px;font-size:9px;border:1px solid #394047;color:#cdd2d6;background:#171a1d}.rec-tag.interactive{color:#7be495;border-color:#326a40;background:#142719}.rec-tag.batch{color:#79bfff;border-color:#315d7b;background:#14212a}.rec-tag.longctx{color:#d8a6ff;border-color:#65437c;background:#24172d}.rec-tag.coding{color:#ffd56a;border-color:#6e5b21;background:#2b2513}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -2145,12 +2153,99 @@ function filteredBenchHistory(){
  });
 }
 
+function benchPeerKey(x){
+ return [
+  x.model||'',x.quantization||'',x.prompt_profile||'',
+  x.max_tokens||'',x.enable_thinking?'1':'0',
+  _benchGpuLabel(x)
+ ].join('|');
+}
+
+function normalized(v,min,max,invert=false){
+ v=Number(v||0);min=Number(min||0);max=Number(max||0);
+ if(max<=min)return 1;
+ let n=(v-min)/(max-min);
+ if(invert)n=1-n;
+ return Math.max(0,Math.min(1,n));
+}
+
+function benchScores(rows){
+ const groups={};
+ rows.forEach(x=>{const k=benchPeerKey(x);(groups[k]??=[]).push(x);});
+ const out={};
+ Object.values(groups).forEach(group=>{
+   const vals=k=>group.map(x=>Number(x[k]||0)).filter(Number.isFinite);
+   const agg=vals('aggregate_tok_s'), per=vals('per_request_min_tok_s'), ttft=vals('ttft_avg_s');
+   const eff=group.map(x=>Number(x.gpu_power_avg_w)>0?Number(x.aggregate_tok_s||0)/Number(x.gpu_power_avg_w):0);
+   const range=a=>[Math.min(...a),Math.max(...a)];
+   const [amin,amax]=range(agg),[pmin,pmax]=range(per),[tmin,tmax]=range(ttft),[emin,emax]=range(eff);
+   group.forEach((x,i)=>{
+     const score=100*(
+       0.35*normalized(x.aggregate_tok_s,amin,amax)+
+       0.25*normalized(x.per_request_min_tok_s,pmin,pmax)+
+       0.20*normalized(eff[i],emin,emax)+
+       0.20*normalized(x.ttft_avg_s,tmin,tmax,true)
+     );
+     out[x.run_id]=Math.round(score);
+   });
+ });
+ return out;
+}
+
+function benchRecommendation(x){
+ const tags=[];
+ const profile=String(x.prompt_profile||'').toLowerCase();
+ const per=Number(x.per_request_min_tok_s||0);
+ const ttft=Number(x.ttft_avg_s||0);
+ const conc=Number(x.concurrency||1);
+
+ if(profile==='short')tags.push(['coding','Light coding']);
+ else if(profile==='medium')tags.push(['coding','Coding / chat']);
+ else if(profile==='long')tags.push(['longctx','Repo / agent']);
+
+ if(ttft<=0.5&&per>=40)tags.push(['interactive','Interactive']);
+ else if(ttft<=2&&per>=20)tags.push(['interactive','Usable live']);
+ else if(ttft>5)tags.push(['batch','Offline']);
+
+ if(conc>=8)tags.push(['batch','Batch / API']);
+ else if(conc>=4&&Number(x.aggregate_tok_s||0)>=150)tags.push(['batch','Multi-user']);
+
+ return tags.slice(0,3);
+}
+
+function ratingHtml(score){
+ const cls=score>=80?'r-high':score>=55?'r-mid':'r-low';
+ return '<span class="rating-pill '+cls+'" title="Balanced score within comparable workload peers">'+score+'/100</span>';
+}
+
+function recHtml(x){
+ return '<div class="rec-badges">'+benchRecommendation(x).map(t=>'<span class="rec-tag '+t[0]+'">'+escHtml(t[1])+'</span>').join('')+'</div>';
+}
+
+function updateBenchBestCards(rows,scores){
+ if(!rows.length){benchBestAgg.textContent=benchBestEff.textContent=benchBestScore.textContent='—';return;}
+ const bestAgg=rows.reduce((a,b)=>Number(b.aggregate_tok_s||0)>Number(a.aggregate_tok_s||0)?b:a,rows[0]);
+ const eff=x=>Number(x.gpu_power_avg_w)>0?Number(x.aggregate_tok_s||0)/Number(x.gpu_power_avg_w):0;
+ const bestEff=rows.reduce((a,b)=>eff(b)>eff(a)?b:a,rows[0]);
+ const bestScore=rows.reduce((a,b)=>(scores[b.run_id]||0)>(scores[a.run_id]||0)?b:a,rows[0]);
+ benchBestAgg.textContent=Number(bestAgg.aggregate_tok_s||0).toFixed(2)+' tok/s';
+ benchBestAggSub.textContent=(bestAgg.model||'—')+' • '+(bestAgg.prompt_profile||'—')+' • conc '+bestAgg.concurrency+' • PL '+Math.round(bestAgg.gpu_power_limit_w||0)+' W';
+ benchBestEff.textContent=eff(bestEff).toFixed(3)+' tok/s/W';
+ benchBestEffSub.textContent=(bestEff.model||'—')+' • '+(bestEff.prompt_profile||'—')+' • conc '+bestEff.concurrency+' • PL '+Math.round(bestEff.gpu_power_limit_w||0)+' W';
+ benchBestScore.textContent=(scores[bestScore.run_id]||0)+'/100';
+ benchBestScoreSub.textContent=(bestScore.model||'—')+' • '+(bestScore.prompt_profile||'—')+' • conc '+bestScore.concurrency+' • balanced';
+}
+
 function renderBenchHistory(){
  const body=document.getElementById('benchHistoryRows');
  if(!body)return;
  const rows=filteredBenchHistory().slice().reverse();
+ const scores=benchScores(rows);
+ updateBenchBestCards(rows,scores);
  benchHistoryCount.textContent=rows.length+' shown / '+benchHistoryData.length+' total';
- if(!rows.length){body.innerHTML='<tr><td colspan="16" class="muted">No matching benchmark rows</td></tr>';return;}
+ if(!rows.length){body.innerHTML='<tr><td colspan="23" class="muted">No matching benchmark rows</td></tr>';return;}
+ const maxAgg=Math.max(...rows.map(x=>Number(x.aggregate_tok_s||0)));
+ const maxEff=Math.max(...rows.map(x=>Number(x.gpu_power_avg_w)>0?Number(x.aggregate_tok_s||0)/Number(x.gpu_power_avg_w):0));
  body.innerHTML=rows.map(x=>{
    const rawId=x.run_id||'', runId=encodeURIComponent(rawId);
    const checked=x.selected?' checked':'';
@@ -2167,7 +2262,12 @@ function renderBenchHistory(){
    const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
    const pcie=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ')||'—';
    const ph=(x.prompt_set_hash||'—'); const phShort=ph==='—'?ph:ph.slice(0,12);
-   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td>'+promptProfileBadge(x.prompt_profile)+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+   const agg=Number(x.aggregate_tok_s||0);
+   const efficiency=Number(x.gpu_power_avg_w)>0?agg/Number(x.gpu_power_avg_w):0;
+   const ttftClass=Number(x.ttft_avg_s||0)<=0.5?'metric-good':Number(x.ttft_avg_s||0)<=2?'metric-warn':'metric-bad';
+   const tempClass=Number(x.gpu_temp_peak_c||0)<65?'metric-good':Number(x.gpu_temp_peak_c||0)<78?'metric-warn':'metric-bad';
+   const rowClass=(agg===maxAgg?' row-best-agg':'')+(Math.abs(efficiency-maxEff)<0.000001?' row-best-eff':'');
+   return '<tr class="'+rowClass.trim()+'"><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td>'+promptProfileBadge(x.prompt_profile)+'</td><td title="'+escHtml(ph)+'">'+escHtml(phShort)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td class="'+ttftClass+'">'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td class="'+(agg===maxAgg?'metric-good':'')+'"><b>'+agg.toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td class="'+tempClass+'">'+temp+'</td><td>'+ratingHtml(scores[x.run_id]||0)+'</td><td>'+recHtml(x)+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
