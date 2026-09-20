@@ -9,6 +9,9 @@ import shutil
 import signal
 import subprocess
 import time
+import urllib.request
+import urllib.error
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import psutil
@@ -23,6 +26,7 @@ _STATE_DIR = Path(os.environ.get("AI6_MONITOR_STATE_DIR", str(Path.home() / ".lo
 _MINER_CFG = Path(os.environ.get("AI6_MINER_CONFIG", str(_STATE_DIR / "miner-config.json")))
 _MINER_LOG = Path(os.environ.get("AI6_MINER_LOG", str(_STATE_DIR / "forge-miner.log")))
 _MINER_PID = Path(os.environ.get("AI6_MINER_PID", str(_STATE_DIR / "forge-miner.pid")))
+_MARKET_CACHE = {"ts": 0.0, "data": {}}
 
 _DEFAULT_CFG = {
     "name": "Pearl / PearlHash",
@@ -35,6 +39,8 @@ _DEFAULT_CFG = {
     "extra_args": "",
     "temp_limit": 80,
     "temp_resume": 70,
+    "energy_kzt_kwh": 35.0,
+    "pool_fee_pct": 1.0,
 }
 
 
@@ -49,6 +55,8 @@ class MinerConfigCommand(BaseModel):
     extra_args: str = Field(default="", max_length=1000)
     temp_limit: int = Field(default=80, ge=40, le=110)
     temp_resume: int = Field(default=70, ge=30, le=100)
+    energy_kzt_kwh: float = Field(default=35.0, ge=0, le=10000)
+    pool_fee_pct: float = Field(default=1.0, ge=0, le=100)
 
 
 class MinerActionCommand(BaseModel):
@@ -274,6 +282,296 @@ def _gpu_snapshot():
     return out
 
 
+
+def _http_get(url, timeout=5.0):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "AI6-Miner-Monitor/1.0",
+            "Accept": "application/json,text/html,application/xml,text/xml,*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", errors="replace"), (r.headers.get("content-type") or "")
+
+
+def _walk_json(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk_json(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_json(v)
+
+
+def _num(v):
+    try:
+        if isinstance(v, str):
+            v = v.replace(",", "").strip()
+        return float(v)
+    except Exception:
+        return None
+
+
+def _extract_safetrade_price():
+    # SafeTrade's public API has changed paths over time, so try known public
+    # ticker routes first and then fall back to the public markets page.
+    candidates = [
+        "https://safe.trade/api/v2/public/markets/prlusdt/tickers",
+        "https://safe.trade/api/v2/public/markets/tickers",
+        "https://safetrade.com/api/v2/public/markets/prlusdt/tickers",
+        "https://safetrade.com/api/v2/public/markets/tickers",
+    ]
+    for url in candidates:
+        try:
+            raw, _ = _http_get(url)
+            data = json.loads(raw)
+            for node in _walk_json(data):
+                market = str(
+                    node.get("market")
+                    or node.get("symbol")
+                    or node.get("id")
+                    or node.get("market_id")
+                    or ""
+                ).lower().replace("_", "").replace("-", "").replace("/", "")
+                if market and market != "prlusdt":
+                    continue
+                for key in ("last", "last_price", "lastPrice", "close", "price"):
+                    p = _num(node.get(key))
+                    if p and p > 0:
+                        return p, "SafeTrade API"
+        except Exception:
+            pass
+
+    try:
+        raw, _ = _http_get("https://safetrade.com/markets")
+        # The public page renders a PRL/USDT row. Keep the expression loose
+        # enough to survive minor markup changes.
+        m = re.search(
+            r"PRL\s*/\s*USDT.{0,1200}?([0-9]+(?:\.[0-9]+)?)",
+            re.sub(r"\s+", " ", raw),
+            re.I,
+        )
+        if m:
+            p = _num(m.group(1))
+            if p and p > 0:
+                return p, "SafeTrade markets"
+    except Exception:
+        pass
+    return None, None
+
+
+def _extract_usd_kzt():
+    # Official National Bank of Kazakhstan feed first.
+    try:
+        raw, _ = _http_get("https://nationalbank.kz/rss/rates_all.xml")
+        root = ET.fromstring(raw)
+        for item in root.iter():
+            children = list(item)
+            vals = {str(ch.tag).split("}")[-1].lower(): (ch.text or "").strip() for ch in children}
+            if vals.get("title", "").upper() == "USD":
+                v = _num(vals.get("description") or vals.get("rate"))
+                if v and v > 0:
+                    return v, "NBK"
+    except Exception:
+        pass
+
+    # Public no-key fallback.
+    try:
+        raw, _ = _http_get("https://open.er-api.com/v6/latest/USD")
+        data = json.loads(raw)
+        v = _num((data.get("rates") or {}).get("KZT"))
+        if v and v > 0:
+            return v, "ExchangeRate API"
+    except Exception:
+        pass
+    return None, None
+
+
+def _extract_network():
+    out = {
+        "network_hashrate_hs": None,
+        "difficulty": None,
+        "block_reward_prl": None,
+        "block_time_s": None,
+        "height": None,
+        "source": None,
+    }
+
+    # PearlNet exposes pool-wide live network stats without auth.
+    try:
+        raw, _ = _http_get("https://pearl-net.com/api/pool/stats")
+        data = json.loads(raw)
+        for node in _walk_json(data):
+            for key in ("networkHashrate", "network_hashrate", "networkHashRate", "netHashrate"):
+                v = _num(node.get(key))
+                if v and v > 0:
+                    out["network_hashrate_hs"] = v
+            for key in ("difficulty", "networkDifficulty", "network_difficulty"):
+                v = _num(node.get(key))
+                if v and v > 0:
+                    out["difficulty"] = v
+            for key in ("blockReward", "block_reward", "reward"):
+                v = _num(node.get(key))
+                if v and v > 0 and v < 1e9:
+                    out["block_reward_prl"] = v
+            for key in ("height", "blockHeight", "block_height"):
+                v = _num(node.get(key))
+                if v and v > 0:
+                    out["height"] = int(v)
+        if any(out[k] is not None for k in ("network_hashrate_hs", "block_reward_prl", "difficulty")):
+            out["source"] = "PearlNet"
+    except Exception:
+        pass
+
+    # PearlTrack latest blocks: fill difficulty/reward and estimate recent block time.
+    block_urls = [
+        "https://www.pearltrack.io/api/v1/blocks?page=1&limit=20",
+        "https://www.pearltrack.io/api/v1/blocks?limit=20",
+    ]
+    for url in block_urls:
+        try:
+            raw, _ = _http_get(url)
+            data = json.loads(raw)
+            blocks = None
+            if isinstance(data, list):
+                blocks = data
+            elif isinstance(data, dict):
+                for key in ("blocks", "items", "data", "results"):
+                    if isinstance(data.get(key), list):
+                        blocks = data[key]
+                        break
+            if not blocks:
+                continue
+
+            b0 = blocks[0] if isinstance(blocks[0], dict) else {}
+            if out["difficulty"] is None:
+                out["difficulty"] = _num(b0.get("difficulty"))
+            if out["block_reward_prl"] is None:
+                out["block_reward_prl"] = (
+                    _num(b0.get("rewardPrl"))
+                    or _num(b0.get("blockRewardPrl"))
+                    or _num(b0.get("reward"))
+                )
+            if out["height"] is None:
+                h = _num(b0.get("height") or b0.get("blockHeight"))
+                out["height"] = int(h) if h else None
+
+            times = []
+            for b in blocks:
+                if not isinstance(b, dict):
+                    continue
+                t = _num(b.get("timeMs") or b.get("timestampMs") or b.get("timestamp") or b.get("time"))
+                if t:
+                    if t > 1e12:
+                        t /= 1000.0
+                    times.append(t)
+            times = sorted(times, reverse=True)
+            diffs = [times[i] - times[i+1] for i in range(len(times)-1) if 5 <= times[i] - times[i+1] <= 7200]
+            if diffs:
+                diffs.sort()
+                out["block_time_s"] = diffs[len(diffs)//2]
+            out["source"] = "PearlTrack" if out["source"] is None else out["source"] + " + PearlTrack"
+            break
+        except Exception:
+            pass
+
+    return out
+
+
+def _live_market_data():
+    now = time.time()
+    if now - float(_MARKET_CACHE.get("ts") or 0) < 60 and _MARKET_CACHE.get("data"):
+        return _MARKET_CACHE["data"]
+
+    price, price_source = _extract_safetrade_price()
+    usd_kzt, fx_source = _extract_usd_kzt()
+    network = _extract_network()
+
+    data = {
+        "prl_usdt": price,
+        "price_source": price_source,
+        "usd_kzt": usd_kzt,
+        "fx_source": fx_source,
+        **network,
+        "updated_at": int(now),
+    }
+    _MARKET_CACHE["ts"] = now
+    _MARKET_CACHE["data"] = data
+    return data
+
+
+def _to_hs(rate, unit):
+    if rate is None:
+        return None
+    mult = {
+        "h/s": 1.0,
+        "kh/s": 1e3,
+        "mh/s": 1e6,
+        "gh/s": 1e9,
+        "th/s": 1e12,
+        "ph/s": 1e15,
+        "eh/s": 1e18,
+    }.get(str(unit or "").lower())
+    return float(rate) * mult if mult else None
+
+
+def _profitability(parsed, gpus, cfg):
+    live = _live_market_data()
+    miner_hs = _to_hs(parsed.get("avg_1m") or parsed.get("hashrate"), parsed.get("hashrate_unit") or "TH/s")
+    power_w = sum(float(g.get("power_w") or 0) for g in gpus)
+    eff = None
+    if power_w > 0 and parsed.get("hashrate") is not None:
+        # Keep display unit aligned with the miner TUI (TH/s for Pearl today).
+        eff = float(parsed["hashrate"]) / power_w
+
+    prl_day = None
+    net_hs = live.get("network_hashrate_hs")
+    reward = live.get("block_reward_prl")
+    block_time = live.get("block_time_s")
+    if miner_hs and net_hs and reward and block_time and net_hs > 0 and block_time > 0:
+        share = miner_hs / net_hs
+        blocks_day = 86400.0 / block_time
+        fee = max(0.0, min(100.0, float(cfg.get("pool_fee_pct") or 0))) / 100.0
+        prl_day = share * blocks_day * reward * (1.0 - fee)
+
+    price = live.get("prl_usdt")
+    usd_kzt = live.get("usd_kzt")
+    gross_day_usdt = prl_day * price if prl_day is not None and price else None
+    gross_day_kzt = gross_day_usdt * usd_kzt if gross_day_usdt is not None and usd_kzt else None
+
+    energy_rate = float(cfg.get("energy_kzt_kwh") or 0)
+    energy_day_kzt = (power_w / 1000.0) * 24.0 * energy_rate if power_w > 0 else 0.0
+    net_day_kzt = gross_day_kzt - energy_day_kzt if gross_day_kzt is not None else None
+
+    def scale(v, factor):
+        return None if v is None else v * factor
+
+    return {
+        "efficiency_hashrate_per_w": eff,
+        "power_w": power_w,
+        "energy_kzt_kwh": energy_rate,
+        "pool_fee_pct": float(cfg.get("pool_fee_pct") or 0),
+        "prl_hour": scale(prl_day, 1/24),
+        "prl_day": prl_day,
+        "prl_month": scale(prl_day, 30),
+        "gross_usdt_hour": scale(gross_day_usdt, 1/24),
+        "gross_usdt_day": gross_day_usdt,
+        "gross_usdt_month": scale(gross_day_usdt, 30),
+        "gross_kzt_hour": scale(gross_day_kzt, 1/24),
+        "gross_kzt_day": gross_day_kzt,
+        "gross_kzt_month": scale(gross_day_kzt, 30),
+        "electricity_kzt_hour": scale(energy_day_kzt, 1/24),
+        "electricity_kzt_day": energy_day_kzt,
+        "electricity_kzt_month": scale(energy_day_kzt, 30),
+        "net_kzt_hour": scale(net_day_kzt, 1/24),
+        "net_kzt_day": net_day_kzt,
+        "net_kzt_month": scale(net_day_kzt, 30),
+        "market": live,
+    }
+
+
 def _status():
     cfg = _load_cfg()
     proc = _miner_proc()
@@ -289,6 +587,8 @@ def _status():
     log = _tail_log()
     parsed = _parse_miner_log(log)
     binary = _detect_binary(cfg)
+    gpus = _gpu_snapshot()
+    profitability = _profitability(parsed, gpus, cfg)
     return {
         "running": running,
         "pid": pid,
@@ -297,7 +597,8 @@ def _status():
         "binary_detected": binary,
         "config": cfg,
         "metrics": parsed,
-        "gpus": _gpu_snapshot(),
+        "gpus": gpus,
+        "profitability": profitability,
         "log_path": str(_MINER_LOG),
     }
 
@@ -447,6 +748,8 @@ def install():
       <label>Extra args<input id="minerExtra" placeholder="e.g. --cmp-install"></label>
       <label>Temp limit °C<input id="minerTempLimit" type="number" value="80" min="40" max="110"></label>
       <label>Resume °C<input id="minerTempResume" type="number" value="70" min="30" max="100"></label>
+      <label>Electricity ₸/kWh<input id="minerEnergyKzt" type="number" value="35" min="0" step="0.1"></label>
+      <label>Pool fee %<input id="minerPoolFee" type="number" value="1" min="0" max="100" step="0.1"></label>
     </div>
 
     <div class="miner-actions">
@@ -476,6 +779,22 @@ def install():
 
     <div id="minerGpuGrid" class="vllm-gpu-grid"></div>
 
+    <div class="miner-profit">
+      <div class="miner-kpi"><span>Efficiency</span><b id="minerEfficiency">—</b><small id="minerEfficiencySub">GPU hashrate / GPU watts</small></div>
+      <div class="miner-kpi"><span>PRL price</span><b id="minerPrlPrice">—</b><small id="minerPriceSource">live market</small></div>
+      <div class="miner-kpi"><span>Network</span><b id="minerNetwork">—</b><small id="minerDifficulty">difficulty —</small></div>
+      <div class="miner-kpi"><span>Electricity</span><b id="minerElectricity">—</b><small id="minerEnergyRate">35 ₸/kWh • GPU only</small></div>
+    </div>
+
+    <div class="miner-profit-table">
+      <div class="mph"><span>Period</span><b>PRL</b><b>Gross ₸</b><b>Electricity ₸</b><b>Net ₸</b></div>
+      <div class="mpr"><span>Hour</span><b id="profitPrlHour">—</b><b id="profitGrossHour">—</b><b id="profitElecHour">—</b><b id="profitNetHour">—</b></div>
+      <div class="mpr"><span>Day</span><b id="profitPrlDay">—</b><b id="profitGrossDay">—</b><b id="profitElecDay">—</b><b id="profitNetDay">—</b></div>
+      <div class="mpr"><span>30 days</span><b id="profitPrlMonth">—</b><b id="profitGrossMonth">—</b><b id="profitElecMonth">—</b><b id="profitNetMonth">—</b></div>
+    </div>
+
+    <div class="miner-profit-note" id="minerProfitNote">Profitability uses live PRL price/network data and current GPU power. Mining income is an estimate and varies with network difficulty, pool luck and price.</div>
+
     <div class="miner-log-wrap">
       <div class="miner-log-head"><span id="minerLogPath">ForgeMiner log</span><button type="button" onclick="refreshMinerLogs()">Refresh log</button></div>
       <pre id="minerLogText">No miner log loaded yet.</pre>
@@ -489,7 +808,8 @@ def install():
         dashboard = dashboard.replace("</body>", miner_html + "\n</body>", 1)
 
     css = r'''
-.miner-summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px;margin:10px 0}
+.miner-summary,.miner-profit{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px;margin:10px 0}
+.miner-profit-table{border:1px solid #30343a;border-radius:9px;overflow:hidden;margin:9px 0}.miner-profit-table .mph,.miner-profit-table .mpr{display:grid;grid-template-columns:120px repeat(4,minmax(100px,1fr));gap:8px;padding:7px 10px;align-items:center}.miner-profit-table .mph{background:#121416;color:#8f969c;font-size:10px}.miner-profit-table .mpr{border-top:1px solid #292d31;font-size:11px}.miner-profit-table .mpr b:last-child{color:#7be495}.miner-profit-note{color:#8d949a;font-size:10px;margin:4px 0 10px}
 .miner-kpi{background:#171717;border:1px solid #303030;border-radius:9px;padding:9px 11px}
 .miner-kpi span,.miner-kpi small{display:block;color:#92979c;font-size:10px}.miner-kpi b{display:block;color:#eee;font-size:21px;margin:2px 0}
 .miner-config{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:8px;align-items:end}
@@ -524,6 +844,8 @@ function loadMinerConfig(c,detected){
  minerExtra.value=c.extra_args||'';
  minerTempLimit.value=c.temp_limit||80;
  minerTempResume.value=c.temp_resume||70;
+ minerEnergyKzt.value=(c.energy_kzt_kwh??35);
+ minerPoolFee.value=(c.pool_fee_pct??1);
  minerConfigLoaded=true;
 }
 
@@ -545,7 +867,132 @@ async function refreshMiner(){
   minerAiState.className=s.vllm_busy?'bad':'ok';
   minerLogPath.textContent=s.log_path||'ForgeMiner log';
   renderMinerGpuGrid(s.gpus||[],String((s.config||{}).gpu||'0'));
+  renderMinerProfitability(s.profitability||{});
  }catch(e){minerMsg.textContent='Status error: '+e.message;}
+}
+
+function minerNum(v,d=2){return (v==null||!Number.isFinite(Number(v)))?'—':Number(v).toFixed(d);}
+function minerMoney(v){return (v==null||!Number.isFinite(Number(v)))?'—':Math.round(Number(v)).toLocaleString('ru-RU');}
+function minerHash(v){
+ if(v==null||!Number.isFinite(Number(v)))return '—';
+ const n=Number(v); if(n>=1e18)return (n/1e18).toFixed(2)+' EH/s';
+ if(n>=1e15)return (n/1e15).toFixed(2)+' PH/s';
+ if(n>=1e12)return (n/1e12).toFixed(2)+' TH/s';
+ if(n>=1e9)return (n/1e9).toFixed(2)+' GH/s';
+ return n.toFixed(0)+' H/s';
+}
+function renderMinerProfitability(p){
+ const m=p.market||{};
+ minerEfficiency.textContent=p.efficiency_hashrate_per_w==null?'—':Number(p.efficiency_hashrate_per_w).toFixed(3)+' TH/s/W';
+ minerEfficiencySub.textContent='current GPU hashrate / '+minerNum(p.power_w,1)+' W';
+ minerPrlPrice.textContent=m.prl_usdt==null?'—':'
+ const sel=new Set(String(gpuString||'').split(',').map(x=>Number(x.trim())).filter(Number.isFinite));
+ minerGpuGrid.innerHTML=(gpus||[]).map(g=>{
+  const active=sel.has(g.index);
+  const load=Number(g.load_pct||0),p=Number(g.power_w||0),pl=Number(g.power_limit_w||0),t=Number(g.temp_c||0);
+  const loadCls=load>=90?'ok':load>=50?'warn':'';
+  const pCls=pl&&p/pl>=.98?'bad':pl&&p/pl>=.90?'warn':'ok';
+  const tCls=t>=80?'bad':t>=70?'warn':'ok';
+  const used=Number(g.vram_used_mib||0)/1024,total=Number(g.vram_total_mib||0)/1024;
+  return '<div class="vllm-gpu-card'+(active?' selected':'')+'">'+
+   '<div class="vllm-gpu-card-head"><b>#'+g.index+' '+escHtml(g.name||'GPU')+'</b><span>'+(active?'miner selected':'available')+'</span></div>'+
+   '<div class="vllm-gpu-stats">'+
+    '<div>Load<b class="'+loadCls+'">'+load.toFixed(0)+'%</b></div>'+
+    '<div>Power<b class="'+pCls+'">'+p.toFixed(1)+' W</b><span> / '+pl.toFixed(0)+' W</span></div>'+
+    '<div>Temp<b class="'+tCls+'">'+t.toFixed(0)+'°C</b><span> fan '+Number(g.fan_pct||0).toFixed(0)+'%</span></div>'+
+    '<div>VRAM<b>'+used.toFixed(2)+' / '+total.toFixed(2)+' GiB</b></div>'+
+   '</div></div>';
+ }).join('')||'<div class="muted">No NVIDIA GPUs detected</div>';
+}
+
+async function saveMinerConfig(){
+ const payload={
+  name:minerName.value.trim(),algorithm:minerAlgorithm.value.trim(),pool:minerPool.value.trim(),
+  wallet:minerWallet.value.trim(),worker:minerWorker.value.trim(),gpu:minerGpu.value.trim(),
+  binary:minerBinary.value.trim(),extra_args:minerExtra.value.trim(),
+  temp_limit:Number(minerTempLimit.value),temp_resume:Number(minerTempResume.value),
+  energy_kzt_kwh:Number(minerEnergyKzt.value),pool_fee_pct:Number(minerPoolFee.value)
+ };
+ minerMsg.textContent='Saving…';
+ try{
+  const r=await fetch('/api/miner/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  minerMsg.textContent='Config saved'+(d.binary_detected?' • '+d.binary_detected:'');
+ }catch(e){minerMsg.textContent='Save error: '+e.message;}
+}
+
+async function controlMiner(action){
+ if(action==='start'){
+  await saveMinerConfig();
+  if(!confirm('Start ForgeMiner on selected GPU(s)?'))return;
+  try{
+   await setMinerPowerLimit(true);
+  }catch(e){
+   minerMsg.textContent='Start blocked: '+e.message;
+   return;
+  }
+ }else if(!confirm('Stop ForgeMiner?'))return;
+ minerMsg.textContent=action==='start'?'Starting miner…':'Stopping miner…';
+ try{
+  const r=await fetch('/api/miner/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  minerMsg.textContent=d.message||'OK';
+  setTimeout(refreshMiner,700);setTimeout(refreshMinerLogs,1200);
+ }catch(e){minerMsg.textContent='Miner error: '+e.message;}
+}
+
+async function setMinerPowerLimit(throwOnError=false){
+ const gpu=Number(minerPlGpu.value),watts=Number(minerPlPreset.value);
+ minerPlMsg.textContent='Setting '+watts+' W…';
+ try{
+  const r=await fetch('/api/gpu/power-limit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gpu,watts})});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  minerPlMsg.textContent='GPU'+gpu+' PL '+Number(d.current_w).toFixed(0)+' W';
+  await refreshMiner();
+  return d;
+ }catch(e){
+  minerPlMsg.textContent='PL error: '+e.message;
+  if(throwOnError)throw e;
+  return null;
+ }
+}
+
+async function refreshMinerLogs(){
+ try{
+  const r=await fetch('/api/miner/logs',{cache:'no-store'});
+  const t=await r.text();
+  minerLogText.textContent=t||'(empty)';
+  minerLogText.scrollTop=minerLogText.scrollHeight;
+ }catch(e){minerLogText.textContent='Log error: '+e.message;}
+}
+
+setInterval(()=>{if(document.getElementById('minerTab')&&document.getElementById('minerTab').style.display!=='none')refreshMiner();},2000);
+'''
+    dashboard = dashboard.replace("refresh();setInterval(refresh,2000);", js + "\nrefresh();setInterval(refresh,2000);", 1)
+
+    base.DASHBOARD = dashboard
+    dynamic.base.DASHBOARD = dashboard
+    dynamic.app = base.app
++Number(m.prl_usdt).toFixed(4);
+ minerPriceSource.textContent=(m.price_source||'price unavailable')+(m.usd_kzt?' • USD/KZT '+Number(m.usd_kzt).toFixed(1):'');
+ minerNetwork.textContent=minerHash(m.network_hashrate_hs);
+ minerDifficulty.textContent='difficulty '+(m.difficulty==null?'—':Number(m.difficulty).toLocaleString('en-US'))+(m.block_time_s?' • block ~'+Math.round(m.block_time_s)+'s':'');
+ minerElectricity.textContent=minerMoney(p.electricity_kzt_day)+' ₸/day';
+ minerEnergyRate.textContent=minerNum(p.energy_kzt_kwh,1)+' ₸/kWh • GPU only';
+ profitPrlHour.textContent=minerNum(p.prl_hour,4);
+ profitPrlDay.textContent=minerNum(p.prl_day,3);
+ profitPrlMonth.textContent=minerNum(p.prl_month,2);
+ profitGrossHour.textContent=minerMoney(p.gross_kzt_hour);
+ profitGrossDay.textContent=minerMoney(p.gross_kzt_day);
+ profitGrossMonth.textContent=minerMoney(p.gross_kzt_month);
+ profitElecHour.textContent=minerMoney(p.electricity_kzt_hour);
+ profitElecDay.textContent=minerMoney(p.electricity_kzt_day);
+ profitElecMonth.textContent=minerMoney(p.electricity_kzt_month);
+ profitNetHour.textContent=minerMoney(p.net_kzt_hour);
+ profitNetDay.textContent=minerMoney(p.net_kzt_day);
+ profitNetMonth.textContent=minerMoney(p.net_kzt_month);
+ const src=[m.price_source,m.fx_source,m.source].filter(Boolean).join(' • ');
+ minerProfitNote.textContent='Estimate from current miner avg1m, live PRL price/network data, pool fee '+minerNum(p.pool_fee_pct,1)+'%, and GPU-only electricity. '+(src?'Sources: '+src+'. ':'')+'Actual payout varies with pool luck, difficulty and price.';
 }
 
 function renderMinerGpuGrid(gpus,gpuString){
@@ -573,7 +1020,8 @@ async function saveMinerConfig(){
   name:minerName.value.trim(),algorithm:minerAlgorithm.value.trim(),pool:minerPool.value.trim(),
   wallet:minerWallet.value.trim(),worker:minerWorker.value.trim(),gpu:minerGpu.value.trim(),
   binary:minerBinary.value.trim(),extra_args:minerExtra.value.trim(),
-  temp_limit:Number(minerTempLimit.value),temp_resume:Number(minerTempResume.value)
+  temp_limit:Number(minerTempLimit.value),temp_resume:Number(minerTempResume.value),
+  energy_kzt_kwh:Number(minerEnergyKzt.value),pool_fee_pct:Number(minerPoolFee.value)
  };
  minerMsg.textContent='Saving…';
  try{
