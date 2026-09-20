@@ -804,8 +804,8 @@ def _combined_benchmark_report(rows):
         "",
         "## Comparison",
         "",
-        "| Date | Model / quant | GPUs | PCIe | Conc | PL total | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power total | Peak temp | Comment |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Date | Model / quant | GPUs | PCIe | Profile | Temp | Thinking | Conc | PL total | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power total | Peak temp | Comment |",
+        "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for x in rows:
         date = (x.get("timestamp") or "-").replace("T", " ")[:19]
@@ -818,6 +818,7 @@ def _combined_benchmark_report(rows):
         lines.append(
             f"| {date} | {model_quant} | {_gpu_config_label(x)} | "
             f"{'; '.join('GPU'+str(p.get('index','?'))+':G'+str(p.get('gen_current') or '?')+'x'+str(p.get('width_current') or '?') for p in (x.get('pcie') or [])) or '-'} | "
+            f"{x.get('prompt_profile') or '-'} | {x.get('temperature','-')} | {'ON' if x.get('enable_thinking') else 'OFF'} | "
             f"{x.get('concurrency','-')} | "
             f"{f'{pl:.0f} W' if isinstance(pl,(int,float)) else '-'} | "
             f"{x.get('prompt_tokens','-')} | {x.get('max_tokens','-')} | "
@@ -885,6 +886,9 @@ def _combined_benchmark_report_html(rows):
           <td><b>{h(x.get("model") or "-")}</b><div class="sub">{h(x.get("quantization") or "-")}</div></td>
           <td>{h(_gpu_config_label(x))}</td>
           <td>{h("; ".join("GPU"+str(p.get("index","?"))+": G"+str(p.get("gen_current") or "?")+" x"+str(p.get("width_current") or "?") for p in (x.get("pcie") or [])) or "-")}</td>
+          <td>{h(x.get("prompt_profile") or "-")}</td>
+          <td>{h(x.get("temperature") if x.get("temperature") is not None else "-")}</td>
+          <td><b>{'ON' if x.get("enable_thinking") else 'OFF'}</b></td>
           <td>{h(x.get("concurrency","-"))}</td>
           <td>{fmt(pl,0)} W</td>
           <td>{h(x.get("prompt_tokens","-"))}</td>
@@ -978,7 +982,7 @@ details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);bo
 {highlights}
 <div class="table-wrap"><table>
 <thead><tr>
-<th>#</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Conc</th><th>PL total</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
+<th>#</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Profile</th><th>Temp</th><th>Thinking</th><th>Conc</th><th>PL total</th><th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Power avg/peak</th><th>Temp</th><th>tok/s/W</th><th>Comment</th>
 </tr></thead>
 <tbody>{''.join(body_rows)}</tbody>
 </table></div>
