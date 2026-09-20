@@ -230,7 +230,11 @@ def install():
   </div>
 </div>
 '''
-    dashboard = dashboard.replace('</div>\n<div id="minerTab"', '</div>\n' + html + '\n<div id="minerTab"', 1)
+    marker = '<div id="minerTab"'
+    if marker not in dashboard:
+        raise RuntimeError("Insights tab injection failed: minerTab marker not found")
+    if 'id="insightsTab"' not in dashboard:
+        dashboard = dashboard.replace(marker, html + '\n' + marker, 1)
 
     css = r'''
 .insight-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:9px;margin:10px 0}
@@ -245,34 +249,34 @@ def install():
 '''
     dashboard = dashboard.replace("</style>", css + "\n</style>", 1)
 
-    # Extend tab switcher after miner integration.
-    dashboard = dashboard.replace(
-        "const mon=document.getElementById('monitorTab'),vl=document.getElementById('vllmTab'),bh=document.getElementById('benchsTab'),mn=document.getElementById('minerTab');",
-        "const mon=document.getElementById('monitorTab'),vl=document.getElementById('vllmTab'),bh=document.getElementById('benchsTab'),mn=document.getElementById('minerTab'),ins=document.getElementById('insightsTab');",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "const mb=document.getElementById('tabMonitorBtn'),vb=document.getElementById('tabVllmBtn'),bb=document.getElementById('tabBenchsBtn'),nb=document.getElementById('tabMinerBtn');",
-        "const mb=document.getElementById('tabMonitorBtn'),vb=document.getElementById('tabVllmBtn'),bb=document.getElementById('tabBenchsBtn'),nb=document.getElementById('tabMinerBtn'),ib=document.getElementById('tabInsightsBtn');",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "mn.style.display=which==='miner'?'block':'none';",
-        "mn.style.display=which==='miner'?'block':'none';\n ins.style.display=which==='insights'?'block':'none';",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "nb.classList.toggle('active',which==='miner');",
-        "nb.classList.toggle('active',which==='miner');\n ib.classList.toggle('active',which==='insights');",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "if(which==='miner'){refreshMiner();refreshMinerLogs();}",
-        "if(which==='miner'){refreshMiner();refreshMinerLogs();}\n if(which==='insights'){refreshInsights();}",
-        1,
-    )
+    # Wrap the existing Monitor/vLLM/Benchs/Miner switcher in JS instead of
+    # rewriting its internals. This keeps the original tabs working even if
+    # the Insights pane is missing or changed later.
 
     js = r'''
+const _ai6ShowTopTabBase = showTopTab;
+showTopTab = function(which){
+ const ins=document.getElementById('insightsTab');
+ const ib=document.getElementById('tabInsightsBtn');
+
+ if(which==='insights'){
+  ['monitorTab','vllmTab','benchsTab','minerTab'].forEach(id=>{
+   const e=document.getElementById(id); if(e)e.style.display='none';
+  });
+  ['tabMonitorBtn','tabVllmBtn','tabBenchsBtn','tabMinerBtn'].forEach(id=>{
+   const e=document.getElementById(id); if(e)e.classList.remove('active');
+  });
+  if(ins)ins.style.display='block';
+  if(ib)ib.classList.add('active');
+  refreshInsights();
+  return;
+ }
+
+ if(ins)ins.style.display='none';
+ if(ib)ib.classList.remove('active');
+ return _ai6ShowTopTabBase(which);
+};
+
 function insRunLabel(x){
  if(!x)return '—';
  return (x.prompt_profile||'—')+' • conc '+(x.concurrency??'—')+' • '+(x.max_tokens??'—')+' out • PL '+Math.round(x.gpu_power_limit_w||0)+'W';
