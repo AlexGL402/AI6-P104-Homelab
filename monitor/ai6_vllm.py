@@ -805,14 +805,14 @@ def install():
     <div class="vllm-actions">
       <button onclick="startVllm()">Start</button>
       <button onclick="controlVllm('stop')">Stop</button>
-      <button onclick="controlVllm('restart')">Restart</button>
+      <button onclick="applyRestartVllm()">Apply / Restart</button>
       <button onclick="downloadVllmReport()">Download report</button>
       <button onclick="toggleVllmLogs()">Logs</button>
       <span id="vllmMsg" class="muted"></span>
     </div>
     <div class="vllm-cards">
       <div class="worker-stat">PID<b id="vllmPid">—</b></div>
-      <div class="worker-stat">Model<b id="vllmLiveModel">—</b></div>
+      <div class="worker-stat">Running model<b id="vllmLiveModel">—</b></div>
       <div class="worker-stat">Uptime<b id="vllmUptime">—</b></div>
       <div class="worker-stat">Running<b id="vllmRunning">—</b></div>
       <div class="worker-stat">Waiting<b id="vllmWaiting">—</b></div>
@@ -966,6 +966,23 @@ async function startVllm(){
  }catch(e){vllmMsg.textContent='Start error: '+e.message;}
 }
 
+async function applyRestartVllm(){
+ await loadVllmModels();
+ const model=vllmModel.value;if(!model){vllmMsg.textContent='No vLLM model selected';return;}
+ const payload={model:model,port:Number(vllmPort.value),max_model_len:Number(vllmCtx.value),gpu_memory_utilization:Number(vllmMem.value),enforce_eager:vllmEager.checked,dtype:'half'};
+ if(!confirm('Restart vLLM and load '+vllmModel.options[vllmModel.selectedIndex].text+'?'))return;
+ vllmMsg.textContent='Stopping current vLLM…';
+ try{
+  let r=await fetch('/api/vllm/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})});
+  let d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  vllmMsg.textContent='Starting selected model…';
+  r=await fetch('/api/vllm/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  vllmMsg.textContent='Started PID '+d.pid+'; loading '+vllmModel.options[vllmModel.selectedIndex].text+'…';
+  setTimeout(refreshVllm,1200);
+ }catch(e){vllmMsg.textContent='Apply/restart error: '+e.message;}
+}
+
 async function controlVllm(action){
  if(action==='stop'&&!confirm('Stop vLLM server?'))return;
  vllmMsg.textContent=action+' vLLM…';
@@ -1009,7 +1026,11 @@ async function refreshVllm(){
   }else{
     lw.style.display='none';vllmLoadFill.style.width='0%';vllmLoadPct.textContent='0%';
   }
-  vllmPid.textContent=s.pid??'—';vllmLiveModel.textContent=s.model||'—';vllmUptime.textContent=s.running?fmtUptime(s.uptime_s):'—';
+  vllmPid.textContent=s.pid??'—';
+  const runningModel=(s.model||'—').split('/').pop();
+  vllmLiveModel.textContent=runningModel;
+  vllmLiveModel.title=s.model||'';
+  vllmUptime.textContent=s.running?fmtUptime(s.uptime_s):'—';
   const m=s.metrics||{};vllmRunning.textContent=m.running==null?'—':Math.round(m.running);vllmWaiting.textContent=m.waiting==null?'—':Math.round(m.waiting);
   vllmKv.textContent=m.kv_cache_usage==null?'—':(m.kv_cache_usage*100).toFixed(1)+'%';
   const now=performance.now()/1000;
