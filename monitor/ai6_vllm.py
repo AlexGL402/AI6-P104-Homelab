@@ -90,6 +90,10 @@ class BenchmarkMetaCommand(BaseModel):
     comment: str | None = Field(default=None, max_length=500)
 
 
+class BenchmarkDeleteCommand(BaseModel):
+    run_ids: list[str] = Field(min_length=1, max_length=500)
+
+
 def _save_bench_results():
     _BENCH_STORE.parent.mkdir(parents=True, exist_ok=True)
     tmp = _BENCH_STORE.with_suffix(".tmp")
@@ -654,6 +658,69 @@ def _single_benchmark_report(x):
     return "\n".join(lines)
 
 
+def _combined_benchmark_report(rows):
+    rows = list(rows)
+    lines = [
+        "# AI6 vLLM selected benchmark report",
+        "",
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"Selected runs: {len(rows)}",
+        "",
+        "## Comparison",
+        "",
+        "| Date | Model / quant | Conc | PL | Prompt tok | Out/req | TTFT avg/max | Wall s | Aggregate tok/s | Per-request tok/s | Avg/peak power | Peak temp | Comment |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for x in rows:
+        date = (x.get("timestamp") or "-").replace("T", " ")[:19]
+        model_quant = f"{x.get('model') or '-'} / {x.get('quantization') or '-'}"
+        pl = x.get("gpu_power_limit_w")
+        avg_p = x.get("gpu_power_avg_w")
+        peak_p = x.get("gpu_power_peak_w")
+        temp = x.get("gpu_temp_peak_c")
+        comment = (x.get("comment") or "-").replace("|", "/").replace("\n", " ")
+        lines.append(
+            f"| {date} | {model_quant} | {x.get('concurrency','-')} | "
+            f"{f'{pl:.0f} W' if isinstance(pl,(int,float)) else '-'} | "
+            f"{x.get('prompt_tokens','-')} | {x.get('max_tokens','-')} | "
+            f"{x.get('ttft_avg_s',0):.3f}/{x.get('ttft_max_s',0):.3f} s | "
+            f"{x.get('wall_s',0):.3f} | {x.get('aggregate_tok_s',0):.2f} | "
+            f"{x.get('per_request_min_tok_s',0):.2f}-{x.get('per_request_max_tok_s',0):.2f} | "
+            f"{f'{avg_p:.1f}/{peak_p:.1f} W' if isinstance(avg_p,(int,float)) and isinstance(peak_p,(int,float)) else '-'} | "
+            f"{f'{temp:.0f} C' if isinstance(temp,(int,float)) else '-'} | {comment} |"
+        )
+
+    if rows:
+        best_agg = max(rows, key=lambda x: float(x.get("aggregate_tok_s") or 0))
+        eff_rows = [
+            (x, float(x.get("aggregate_tok_s") or 0) / float(x.get("gpu_power_avg_w") or 1))
+            for x in rows if x.get("gpu_power_avg_w")
+        ]
+        lines += [
+            "",
+            "## Highlights",
+            f"- Highest aggregate throughput: {best_agg.get('aggregate_tok_s',0):.2f} tok/s — {best_agg.get('model') or '-'}, concurrency {best_agg.get('concurrency','-')}, PL {best_agg.get('gpu_power_limit_w','-')} W.",
+        ]
+        if eff_rows:
+            best_eff, eff = max(eff_rows, key=lambda pair: pair[1])
+            lines.append(
+                f"- Highest measured efficiency: {eff:.3f} aggregate tok/s/W — {best_eff.get('model') or '-'}, "
+                f"concurrency {best_eff.get('concurrency','-')}, PL {best_eff.get('gpu_power_limit_w','-')} W."
+            )
+
+    lines += ["", "## Individual runs", ""]
+    for i, x in enumerate(rows, 1):
+        lines += [
+            f"### Run {i}: {x.get('model') or '-'} / {x.get('quantization') or '-'} — {x.get('concurrency','-')} × {x.get('max_tokens','-')}",
+            "",
+            _single_benchmark_report(x),
+            "",
+            "---",
+            "",
+        ]
+    return "\n".join(lines)
+
+
 @base.app.post("/api/vllm/benchmark/meta")
 def api_vllm_benchmark_meta(cmd: BenchmarkMetaCommand):
     row = _find_bench(cmd.run_id)
@@ -665,6 +732,29 @@ def api_vllm_benchmark_meta(cmd: BenchmarkMetaCommand):
         row["comment"] = cmd.comment.strip()
     _save_bench_results()
     return {"ok": True, "run": row}
+
+
+@base.app.post("/api/vllm/benchmark/delete")
+def api_vllm_benchmark_delete(cmd: BenchmarkDeleteCommand):
+    ids = set(cmd.run_ids)
+    before = len(_BENCH_RESULTS)
+    _BENCH_RESULTS[:] = [x for x in _BENCH_RESULTS if x.get("run_id") not in ids]
+    deleted = before - len(_BENCH_RESULTS)
+    _save_bench_results()
+    return {"ok": True, "deleted": deleted, "remaining": len(_BENCH_RESULTS)}
+
+
+@base.app.get("/api/vllm/report/selected")
+def api_vllm_selected_report(download: int = 0):
+    rows = [x for x in _BENCH_RESULTS if x.get("selected")]
+    if not rows:
+        raise base.HTTPException(status_code=400, detail="no benchmark rows selected")
+    body = _combined_benchmark_report(rows)
+    headers = {}
+    if download:
+        filename = "vllm-selected-" + time.strftime("%Y%m%d-%H%M%S") + ".md"
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return PlainTextResponse(body, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
 @base.app.post("/api/vllm/git/upload-selected")
@@ -1102,6 +1192,7 @@ def install():
       <button class="git-upload-btn" onclick="uploadSelectedBenchmarks()">↑ Upload selected to Git</button>
       <button onclick="setAllBenchSelection(true)">Select all</button>
       <button onclick="setAllBenchSelection(false)">Clear</button>
+      <button class="delete-selected-btn" onclick="deleteSelectedBenchmarks('main')">Del selected</button>
       <span id="vllmGitMsg" class="muted"></span>
     </div>
     <div class="vllm-bench-buttons">
@@ -1140,15 +1231,20 @@ def install():
       <button onclick="setAllHistorySelection(true)">Select visible</button>
       <button onclick="setAllHistorySelection(false)">Clear visible</button>
       <button onclick="clearBenchFilters()">Clear filters</button>
+      <button class="delete-selected-btn" onclick="deleteSelectedBenchmarks('history')">Del selected</button>
+      <span class="combined-report-actions">
+        <a class="run-dl" title="Download combined report for selected rows" href="/api/vllm/report/selected?download=1">↓</a>
+        <a class="run-open" title="Open combined report for selected rows" target="_blank" href="/api/vllm/report/selected">↗</a>
+      </span>
       <span id="benchHistoryMsg" class="muted"></span>
     </div>
 
     <div class="bench-filter-grid">
-      <label>Date<input id="bfDate" placeholder="2026-09-20" oninput="renderBenchHistory()"></label>
-      <label>Model<input id="bfModel" placeholder="Qwen3-4B" oninput="renderBenchHistory()"></label>
-      <label>Quant<input id="bfQuant" placeholder="AWQ" oninput="renderBenchHistory()"></label>
-      <label>Conc<input id="bfConc" placeholder="32" oninput="renderBenchHistory()"></label>
-      <label>PL<input id="bfPl" placeholder="150" oninput="renderBenchHistory()"></label>
+      <label>Date<select id="bfDate" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>Model<select id="bfModel" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>Quant<select id="bfQuant" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>Conc<select id="bfConc" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>PL<select id="bfPl" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Git
         <select id="bfGit" onchange="renderBenchHistory()">
           <option value="">all</option>
@@ -1190,7 +1286,7 @@ def install():
 .vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
 .vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
 .run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
-.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.bench-filter-grid{display:grid;grid-template-columns:repeat(8,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
+.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.delete-selected-btn{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}.combined-report-actions{display:inline-flex;gap:5px;margin-left:2px}.combined-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;text-decoration:none;font-weight:900;font-size:15px;border:1px solid #3a3a3a}.combined-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.combined-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.bench-filter-grid{display:grid;grid-template-columns:repeat(8,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -1322,7 +1418,7 @@ function renderVllmBench(rows){
    const checked=x.selected?' checked':'';
    const uploaded=x.git_uploaded?' title="Already uploaded to Git"':'';
    const comment=(x.comment||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-   const sel=x.run_id?'<input class="bench-select" type="checkbox" data-run-id="'+runId+'" onchange="saveBenchMeta(\''+runId+'\',{selected:this.checked})"'+checked+uploaded+'>':'—';
+   const sel=x.run_id?'<input class="bench-select vllm-bench-select" type="checkbox" data-run-id="'+runId+'" onchange="saveBenchMeta(\''+runId+'\',{selected:this.checked})"'+checked+uploaded+'>':'—';
    const note=x.run_id?'<input class="bench-comment" value="'+comment+'" placeholder="comment…" onblur="saveBenchMeta(\''+runId+'\',{comment:this.value})">':'';
    return '<tr><td>'+sel+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
@@ -1462,6 +1558,29 @@ function setAllBenchSelection(value){
  });
 }
 
+async function deleteSelectedBenchmarks(scope){
+ const selector=scope==='history'?'.history-select:checked':'.vllm-bench-select:checked';
+ const boxes=[...document.querySelectorAll(selector)];
+ if(!boxes.length){
+   const msg=scope==='history'?benchHistoryMsg:vllmGitMsg;
+   msg.textContent='Select at least one row to delete';
+   return;
+ }
+ if(!confirm('Delete '+boxes.length+' selected benchmark result'+(boxes.length===1?'':'s')+' permanently?'))return;
+ const ids=boxes.map(cb=>decodeURIComponent(cb.dataset.runId));
+ try{
+   const r=await fetch('/api/vllm/benchmark/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_ids:ids})});
+   const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+   if(document.getElementById('vllmGitMsg'))vllmGitMsg.textContent='Deleted '+d.deleted+' result'+(d.deleted===1?'':'s');
+   if(document.getElementById('benchHistoryMsg'))benchHistoryMsg.textContent='Deleted '+d.deleted+' result'+(d.deleted===1?'':'s');
+   await refreshVllm();
+   if(document.getElementById('benchsTab')&&document.getElementById('benchsTab').style.display!=='none')await loadBenchHistory();
+ }catch(e){
+   const msg=scope==='history'?benchHistoryMsg:vllmGitMsg;
+   msg.textContent='Delete error: '+e.message;
+ }
+}
+
 async function uploadSelectedBenchmarks(){
  const count=[...document.querySelectorAll('.bench-select:checked')].length;
  if(!count){vllmGitMsg.textContent='Select at least one result';return;}
@@ -1492,8 +1611,26 @@ async function loadBenchHistory(){
   benchStorePath.textContent=d.store||'';
   benchHistoryCount.textContent=benchHistoryData.length+' runs';
   benchHistoryMsg.textContent='';
+  populateBenchFilters();
   renderBenchHistory();
  }catch(e){benchHistoryMsg.textContent='History error: '+e.message;}
+}
+
+function setFilterOptions(id,values){
+ const el=document.getElementById(id);
+ const previous=el.value;
+ const unique=[...new Set(values.filter(v=>v!==null&&v!==undefined&&String(v)!==''))];
+ unique.sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true}));
+ el.innerHTML='<option value="">all</option>'+unique.map(v=>'<option value="'+escHtml(v)+'">'+escHtml(v)+'</option>').join('');
+ if(unique.map(String).includes(previous))el.value=previous;
+}
+
+function populateBenchFilters(){
+ setFilterOptions('bfDate',benchHistoryData.map(x=>(x.timestamp||'').slice(0,10)));
+ setFilterOptions('bfModel',benchHistoryData.map(x=>x.model||''));
+ setFilterOptions('bfQuant',benchHistoryData.map(x=>x.quantization||''));
+ setFilterOptions('bfConc',benchHistoryData.map(x=>String(x.concurrency??'')));
+ setFilterOptions('bfPl',benchHistoryData.map(x=>x.gpu_power_limit_w==null?'':String(Math.round(x.gpu_power_limit_w))));
 }
 
 function benchFilters(){
@@ -1516,9 +1653,9 @@ function filteredBenchHistory(){
    const model=(x.model||'').toLowerCase();
    const quant=(x.quantization||'').toLowerCase();
    const comment=(x.comment||'').toLowerCase();
-   if(f.date&&!date.includes(f.date))return false;
-   if(f.model&&!model.includes(f.model))return false;
-   if(f.quant&&!quant.includes(f.quant))return false;
+   if(f.date&&!date.startsWith(f.date))return false;
+   if(f.model&&model!==f.model)return false;
+   if(f.quant&&quant!==f.quant)return false;
    if(f.conc&&String(x.concurrency)!==f.conc)return false;
    if(f.pl&&String(Math.round(x.gpu_power_limit_w||0))!==f.pl)return false;
    if(f.git==='yes'&&!x.git_uploaded)return false;
