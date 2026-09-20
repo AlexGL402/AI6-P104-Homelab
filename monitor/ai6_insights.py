@@ -230,11 +230,10 @@ def install():
   </div>
 </div>
 '''
-    marker = '<div id="minerTab"'
-    if marker not in dashboard:
-        raise RuntimeError("Insights tab injection failed: minerTab marker not found")
+    if "</body>" not in dashboard:
+        raise RuntimeError("Insights tab injection failed: </body> marker not found")
     if 'id="insightsTab"' not in dashboard:
-        dashboard = dashboard.replace(marker, html + '\n' + marker, 1)
+        dashboard = dashboard.replace("</body>", html + "\n</body>", 1)
 
     css = r'''
 .insight-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:9px;margin:10px 0}
@@ -254,29 +253,6 @@ def install():
     # the Insights pane is missing or changed later.
 
     js = r'''
-const _ai6ShowTopTabBase = showTopTab;
-showTopTab = function(which){
- const ins=document.getElementById('insightsTab');
- const ib=document.getElementById('tabInsightsBtn');
-
- if(which==='insights'){
-  ['monitorTab','vllmTab','benchsTab','minerTab'].forEach(id=>{
-   const e=document.getElementById(id); if(e)e.style.display='none';
-  });
-  ['tabMonitorBtn','tabVllmBtn','tabBenchsBtn','tabMinerBtn'].forEach(id=>{
-   const e=document.getElementById(id); if(e)e.classList.remove('active');
-  });
-  if(ins)ins.style.display='block';
-  if(ib)ib.classList.add('active');
-  refreshInsights();
-  return;
- }
-
- if(ins)ins.style.display='none';
- if(ib)ib.classList.remove('active');
- return _ai6ShowTopTabBase(which);
-};
-
 function insRunLabel(x){
  if(!x)return '—';
  return (x.prompt_profile||'—')+' • conc '+(x.concurrency??'—')+' • '+(x.max_tokens??'—')+' out • PL '+Math.round(x.gpu_power_limit_w||0)+'W';
