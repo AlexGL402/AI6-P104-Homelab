@@ -548,6 +548,12 @@ async function controlMiner(action){
  if(action==='start'){
   await saveMinerConfig();
   if(!confirm('Start ForgeMiner on selected GPU(s)?'))return;
+  try{
+   await setMinerPowerLimit(true);
+  }catch(e){
+   minerMsg.textContent='Start blocked: '+e.message;
+   return;
+  }
  }else if(!confirm('Stop ForgeMiner?'))return;
  minerMsg.textContent=action==='start'?'Starting miner…':'Stopping miner…';
  try{
@@ -558,7 +564,7 @@ async function controlMiner(action){
  }catch(e){minerMsg.textContent='Miner error: '+e.message;}
 }
 
-async function setMinerPowerLimit(){
+async function setMinerPowerLimit(throwOnError=false){
  const gpu=Number(minerPlGpu.value),watts=Number(minerPlPreset.value);
  minerPlMsg.textContent='Setting '+watts+' W…';
  try{
@@ -566,7 +572,12 @@ async function setMinerPowerLimit(){
   const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
   minerPlMsg.textContent='GPU'+gpu+' PL '+Number(d.current_w).toFixed(0)+' W';
   await refreshMiner();
- }catch(e){minerPlMsg.textContent='PL error: '+e.message;}
+  return d;
+ }catch(e){
+  minerPlMsg.textContent='PL error: '+e.message;
+  if(throwOnError)throw e;
+  return null;
+ }
 }
 
 async function refreshMinerLogs(){
