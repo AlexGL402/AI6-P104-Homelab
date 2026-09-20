@@ -16,6 +16,37 @@
 
 Important: these tests were performed **before any capacitor / board-level modification**. The card is still in its current stock hardware state.
 
+## Exact GPU identification
+
+Captured before any board-level modification:
+
+```text
+NVIDIA CMP 40HX
+PCI bus: 00000000:01:00.0
+PCI device ID: 0x1F0B10DE
+PCI sub-device ID: 0x88041043
+PCI ID: 10de:1f0b
+Subsystem: ASUSTeK Computer Inc. [1043:8804]
+GPU UUID: GPU-bf89a502-a3ca-35ca-ef44-776e1e596693
+VBIOS: 90.06.67.00.04
+VRAM: 8192 MiB
+Default power limit: 184.00 W
+Maximum power limit: 220.00 W
+Chip: TU106, revision a1
+Device class: 3D controller [0302]
+Kernel driver: nvidia
+```
+
+PCIe capability / negotiated link:
+
+```text
+LnkCap: Speed 2.5 GT/s, Width x16
+LnkSta: Speed 2.5 GT/s, Width x4 (downgraded)
+Supported link speeds: 2.5 GT/s
+```
+
+So in the current machine the card is negotiating **PCIe Gen1 x4**, although the device capability reports x16 width.
+
 ## CMP unlock
 
 ForgeMiner CMP hardware unlock is working with NVIDIA driver 610.43.03 and the open NVIDIA kernel modules.
@@ -126,16 +157,3 @@ Existing P104 reference from `2026-09-10-summary.md`:
 | Huanan / Windows | 1× P104-100 8 GB | Gen1 x4 | 217.63 | 28.17 |
 | AI6 / Ubuntu | 1× P104-100 8 GB | Gen1 x1 | 144.09 | 23.74 |
 
-## Identification details still to capture
-
-For the final hardware record, capture exact PCI/device/subsystem/VBIOS information with:
-
-```bash
-nvidia-smi --query-gpu=name,pci.bus_id,pci.device_id,pci.sub_device_id,uuid,vbios_version,memory.total,power.default_limit,power.max_limit --format=csv
-
-lspci -nnk -s 01:00.0
-
-sudo lspci -vv -s 01:00.0
-```
-
-Append these values after collection so the exact CMP 40HX board identity is preserved before any hardware modification.
