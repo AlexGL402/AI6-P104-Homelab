@@ -41,7 +41,7 @@ _DEFAULT_CFG = {
     "temp_limit": 80,
     "temp_resume": 70,
     "energy_kzt_kwh": 35.0,
-    "pool_fee_pct": 1.0,
+    "pool_fee_pct": 2.0,
 }
 
 
@@ -57,7 +57,7 @@ class MinerConfigCommand(BaseModel):
     temp_limit: int = Field(default=80, ge=40, le=110)
     temp_resume: int = Field(default=70, ge=30, le=100)
     energy_kzt_kwh: float = Field(default=35.0, ge=0, le=10000)
-    pool_fee_pct: float = Field(default=1.0, ge=0, le=100)
+    pool_fee_pct: float = Field(default=2.0, ge=0, le=100)
 
 
 class MinerActionCommand(BaseModel):
@@ -844,7 +844,7 @@ def install():
       <label>Temp limit °C<input id="minerTempLimit" type="number" value="80" min="40" max="110"></label>
       <label>Resume °C<input id="minerTempResume" type="number" value="70" min="30" max="100"></label>
       <label>Electricity ₸/kWh<input id="minerEnergyKzt" type="number" value="35" min="0" step="0.1"></label>
-      <label>Pool fee %<input id="minerPoolFee" type="number" value="1" min="0" max="100" step="0.1"></label>
+      <label>Pool fee %<input id="minerPoolFee" type="number" value="2" min="0" max="100" step="0.1"></label>
     </div>
 
     <div class="miner-actions">
@@ -940,7 +940,7 @@ function loadMinerConfig(c,detected){
  minerTempLimit.value=c.temp_limit||80;
  minerTempResume.value=c.temp_resume||70;
  minerEnergyKzt.value=(c.energy_kzt_kwh??35);
- minerPoolFee.value=(c.pool_fee_pct??1);
+ minerPoolFee.value=(c.pool_fee_pct??2);
  minerConfigLoaded=true;
 }
 
