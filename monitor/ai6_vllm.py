@@ -439,11 +439,14 @@ def api_vllm_control(cmd: VllmControlCommand):
 
 
 def _bench_one(port, model, prompt, max_tokens):
+    """Run one streaming request and capture TTFT + exact token usage."""
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
     }).encode("utf-8")
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -452,11 +455,46 @@ def _bench_one(port, model, prompt, max_tokens):
         method="POST",
     )
     started = time.perf_counter()
+    first_token_at = None
+    prompt_tokens = 0
+    completion_tokens = 0
     with urllib.request.urlopen(req, timeout=600) as r:
-        data = json.load(r)
-    elapsed = time.perf_counter() - started
-    tokens = int((data.get("usage") or {}).get("completion_tokens") or 0)
-    return tokens, elapsed
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            body = line[5:].strip()
+            if not body or body == "[DONE]":
+                continue
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                continue
+            choices = data.get("choices") or []
+            if choices:
+                delta = (choices[0].get("delta") or {}).get("content")
+                if delta and first_token_at is None:
+                    first_token_at = time.perf_counter()
+            usage = data.get("usage") or {}
+            if usage:
+                prompt_tokens = int(usage.get("prompt_tokens") or prompt_tokens or 0)
+                completion_tokens = int(usage.get("completion_tokens") or completion_tokens or 0)
+
+    finished = time.perf_counter()
+    elapsed = finished - started
+    ttft = (first_token_at - started) if first_token_at is not None else elapsed
+    decode_s = max(0.0, elapsed - ttft)
+    decode_tok_s = completion_tokens / decode_s if decode_s > 0 and completion_tokens else 0.0
+    e2e_tok_s = completion_tokens / elapsed if elapsed > 0 and completion_tokens else 0.0
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "elapsed_s": elapsed,
+        "ttft_s": ttft,
+        "decode_s": decode_s,
+        "decode_tok_s": decode_tok_s,
+        "e2e_tok_s": e2e_tok_s,
+    }
 
 
 @base.app.post("/api/vllm/prompt")
@@ -591,13 +629,15 @@ def api_vllm_report():
         "",
         "## UI benchmark results",
         "",
-        "| Concurrent | Output/request | Total tokens | Wall s | Aggregate tok/s | Per-request tok/s | Avg GPU load | Avg/peak power | Peak VRAM | Peak temp |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Concurrent | Prompt tok | Output/request | Total tokens | TTFT avg/max | Prompt tok/s* | Wall s | Aggregate tok/s | Per-request tok/s | Avg GPU load | Avg/peak power | Peak VRAM | Peak temp |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     if _BENCH_RESULTS:
         for x in _BENCH_RESULTS:
             lines.append(
-                f"| {x['concurrency']} | {x['max_tokens']} | {x['total_tokens']} | "
+                f"| {x['concurrency']} | {x.get('prompt_tokens', '-')} | {x['max_tokens']} | {x['total_tokens']} | "
+                f"{x.get('ttft_avg_s', 0):.3f}/{x.get('ttft_max_s', 0):.3f} s | "
+                f"{x.get('prompt_tok_s_approx', 0):.2f} | "
                 f"{x['wall_s']:.3f} | {x['aggregate_tok_s']:.2f} | "
                 f"{x['per_request_min_tok_s']:.2f}-{x['per_request_max_tok_s']:.2f} | "
                 f"{x.get('gpu_load_avg_pct', '-') if x.get('gpu_load_avg_pct') is not None else '-'}% | "
@@ -607,9 +647,15 @@ def api_vllm_report():
                 f"{x.get('gpu_temp_peak_c', '-') if x.get('gpu_temp_peak_c') is not None else '-'} C |"
             )
     else:
-        lines.append("| - | - | - | - | - | no UI benchmark runs yet | - | - | - | - |")
+        lines.append("| - | - | - | - | - | - | - | - | no UI benchmark runs yet | - | - | - | - |")
     if _BENCH_RESULTS:
-        lines += ["", "## Benchmark telemetry details", ""]
+        lines += [
+            "",
+            "*Prompt tok/s is approximate: total prompt tokens divided by the slowest TTFT in the batch; TTFT includes queueing and first-token overhead.*",
+            "",
+            "## Benchmark telemetry details",
+            "",
+        ]
         for x in _BENCH_RESULTS:
             eff = None
             if x.get("gpu_power_avg_w") and x.get("aggregate_tok_s"):
@@ -621,7 +667,13 @@ def api_vllm_report():
                 f"- Context: {x.get('context') or '-'}",
                 f"- Mode: {x.get('mode') or '-'}",
                 f"- vLLM: {x.get('vllm_version') or '-'}",
-                f"- Aggregate throughput: {x['aggregate_tok_s']:.2f} tok/s",
+                f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
+                f"- Output tokens total: {x.get('output_tokens', '-')}",
+                f"- TTFT average: {x.get('ttft_avg_s', 0):.3f} s",
+                f"- TTFT max: {x.get('ttft_max_s', 0):.3f} s",
+                f"- Approx. prompt throughput: {x.get('prompt_tok_s_approx', 0):.2f} tok/s",
+                f"- Average decode speed/request: {x.get('decode_avg_tok_s', 0):.2f} tok/s",
+                f"- Aggregate output throughput: {x['aggregate_tok_s']:.2f} tok/s",
                 f"- Average GPU load: {x.get('gpu_load_avg_pct') if x.get('gpu_load_avg_pct') is not None else '-'} %",
                 f"- Peak GPU load: {x.get('gpu_load_peak_pct') if x.get('gpu_load_peak_pct') is not None else '-'} %",
                 f"- Average GPU power: {x.get('gpu_power_avg_w') if x.get('gpu_power_avg_w') is not None else '-'} W",
@@ -728,15 +780,29 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
             time.sleep(0.5)
         results = [f.result() for f in futures]
     wall = time.perf_counter() - started
-    total_tokens = sum(x[0] for x in results)
-    per_request = [x[0] / x[1] if x[1] > 0 else 0 for x in results]
+    total_output_tokens = sum(x["completion_tokens"] for x in results)
+    total_prompt_tokens = sum(x["prompt_tokens"] for x in results)
+    total_tokens = total_prompt_tokens + total_output_tokens
+    per_request = [x["e2e_tok_s"] for x in results]
+    decode_rates = [x["decode_tok_s"] for x in results]
+    ttfts = [x["ttft_s"] for x in results]
+    # Approximate prompt-prefill throughput for the batch. TTFT contains queueing
+    # and first-token overhead, so keep it explicitly labelled as approximate.
+    prompt_window = max(ttfts) if ttfts else 0.0
+    prompt_tok_s_approx = total_prompt_tokens / prompt_window if prompt_window > 0 else 0.0
     row = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "concurrency": cmd.concurrency,
         "max_tokens": cmd.max_tokens,
+        "prompt_tokens": total_prompt_tokens,
+        "output_tokens": total_output_tokens,
         "total_tokens": total_tokens,
         "wall_s": round(wall, 3),
-        "aggregate_tok_s": round(total_tokens / wall, 2) if wall > 0 else 0,
+        "aggregate_tok_s": round(total_output_tokens / wall, 2) if wall > 0 else 0,
+        "prompt_tok_s_approx": round(prompt_tok_s_approx, 2),
+        "ttft_avg_s": round(sum(ttfts) / len(ttfts), 3) if ttfts else 0,
+        "ttft_max_s": round(max(ttfts), 3) if ttfts else 0,
+        "decode_avg_tok_s": round(sum(decode_rates) / len(decode_rates), 2) if decode_rates else 0,
         "per_request_min_tok_s": round(min(per_request), 2) if per_request else 0,
         "per_request_max_tok_s": round(max(per_request), 2) if per_request else 0,
         "model": Path(status.get("model_path") or status.get("model") or "").name or None,
@@ -876,7 +942,7 @@ def install():
     </div>
     <div class="vllm-table-wrap">
       <table class="vllm-table">
-        <thead><tr><th>Concurrent</th><th>Total tokens</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th></tr></thead>
+        <thead><tr><th>Concurrent</th><th>Prompt tok</th><th>Out/req</th><th>Total tok</th><th>TTFT avg/max</th><th>Prompt tok/s*</th><th>Wall</th><th>Aggregate</th><th>Per request</th><th>Model / quant</th></tr></thead>
         <tbody id="vllmBenchRows"><tr><td colspan="5" class="muted">No UI benchmark runs yet</td></tr></tbody>
       </table>
     </div>
@@ -995,10 +1061,12 @@ async function controlVllm(action){
 
 function renderVllmBench(rows){
  const body=document.getElementById('vllmBenchRows');
- if(!rows||!rows.length){body.innerHTML='<tr><td colspan="6" class="muted">No UI benchmark runs yet</td></tr>';return;}
+ if(!rows||!rows.length){body.innerHTML='<tr><td colspan="10" class="muted">No UI benchmark runs yet</td></tr>';return;}
  body.innerHTML=[...rows].reverse().map(x=>{
    const mq=(x.model||'—')+' / '+(x.quantization||'—');
-   return '<tr><td>'+x.concurrency+'</td><td>'+x.total_tokens+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+'</td></tr>';
+   const ttft=(x.ttft_avg_s??0).toFixed(3)+' / '+(x.ttft_max_s??0).toFixed(3)+' s';
+   const promptRate=(x.prompt_tok_s_approx??0).toFixed(1);
+   return '<tr><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+'</td></tr>';
  }).join('');
 }
 
@@ -1127,7 +1195,7 @@ async function runVllmBench(concurrency){
  try{
   const r=await fetch('/api/vllm/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({concurrency:concurrency,max_tokens:512})});
   const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  vllmBenchMsg.textContent=concurrency+' × 512 = '+d.result.aggregate_tok_s.toFixed(2)+' tok/s';
+  vllmBenchMsg.textContent=concurrency+' × 512 = '+d.result.aggregate_tok_s.toFixed(2)+' tok/s • TTFT '+d.result.ttft_avg_s.toFixed(3)+' s';
   await refreshVllm();
  }catch(e){vllmBenchMsg.textContent='Benchmark error: '+e.message;}
 }
