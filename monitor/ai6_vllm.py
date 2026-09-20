@@ -14,6 +14,7 @@ from pathlib import Path
 
 import psutil
 from pydantic import BaseModel, Field
+from fastapi.responses import PlainTextResponse
 
 import ai6_monitor_dynamic as dynamic
 
@@ -307,6 +308,84 @@ def _bench_one(port, model, prompt, max_tokens):
     return tokens, elapsed
 
 
+@base.app.get("/api/vllm/logs")
+def api_vllm_logs():
+    status = _vllm_status()
+    port = status.get("port") or _VLLM_DEFAULT_PORT
+    log_path = _VLLM_LOG_DIR / f"vllm-{port}.log"
+    if not log_path.is_file():
+        return {"ok": True, "path": str(log_path), "log": "No vLLM log file yet."}
+    try:
+        p = subprocess.run(
+            ["tail", "-n", "220", str(log_path)],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        text = p.stdout or p.stderr or ""
+    except Exception as e:
+        text = f"Failed to read log: {e}"
+    return {"ok": True, "path": str(log_path), "log": text}
+
+
+@base.app.get("/api/vllm/report")
+def api_vllm_report():
+    status = _vllm_status()
+    stats = base.collect_stats()
+    gpu = ((stats.get("gpu") or {}).get("devices") or [None])[0] or {}
+    lines = [
+        "# AI6 vLLM report",
+        "",
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S %z')}",
+        "",
+        "## Server",
+        f"- State: {'READY' if status.get('ready') else 'LOADING' if status.get('running') else 'STOPPED'}",
+        f"- PID: {status.get('pid') or '-'}",
+        f"- Port: {status.get('port') or _VLLM_DEFAULT_PORT}",
+        f"- Model: {status.get('model') or '-'}",
+        f"- Context: {status.get('max_model_len') or '-'}",
+        f"- GPU memory utilization: {status.get('gpu_memory_utilization') or '-'}",
+        f"- Enforce eager: {bool(status.get('enforce_eager'))}",
+        "",
+        "## Host / GPU snapshot",
+        f"- CPU: {(stats.get('cpu') or {}).get('usage_pct', '-')} %",
+        f"- RAM: {(stats.get('memory') or {}).get('usage_pct', '-')} %",
+        f"- GPU: {gpu.get('name', '-')}",
+        f"- GPU load: {gpu.get('utilization_pct', '-')} %",
+        f"- GPU power: {gpu.get('power_w', '-')} W / limit {gpu.get('power_limit_w', '-')} W",
+        f"- VRAM: {gpu.get('memory_used_mib', '-')} MiB / {gpu.get('memory_total_mib', '-')} MiB",
+        f"- GPU temp: {gpu.get('temperature_c', '-')} C",
+        f"- Fan: {gpu.get('fan_pct', '-')} %",
+        "",
+        "## UI benchmark results",
+        "",
+        "| Concurrent | Output/request | Total tokens | Wall s | Aggregate tok/s | Per-request tok/s |",
+        "|---:|---:|---:|---:|---:|---:|",
+    ]
+    if _BENCH_RESULTS:
+        for x in _BENCH_RESULTS:
+            lines.append(
+                f"| {x['concurrency']} | {x['max_tokens']} | {x['total_tokens']} | "
+                f"{x['wall_s']:.3f} | {x['aggregate_tok_s']:.2f} | "
+                f"{x['per_request_min_tok_s']:.2f}-{x['per_request_max_tok_s']:.2f} |"
+            )
+    else:
+        lines.append("| - | - | - | - | - | no UI benchmark runs yet |")
+    lines += [
+        "",
+        "## Paths",
+        f"- vLLM binary: {_VLLM_BIN}",
+        f"- Models: {_VLLM_MODELS_DIR}",
+        f"- Log: {_VLLM_LOG_DIR / ('vllm-' + str(status.get('port') or _VLLM_DEFAULT_PORT) + '.log')}",
+        "",
+    ]
+    body = "\n".join(lines)
+    filename = "ai6-vllm-report-" + time.strftime("%Y%m%d-%H%M%S") + ".md"
+    return PlainTextResponse(
+        body,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @base.app.post("/api/vllm/benchmark")
 def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
     status = _vllm_status()
@@ -376,6 +455,8 @@ def install():
       <button onclick="startVllm()">Start</button>
       <button onclick="controlVllm('stop')">Stop</button>
       <button onclick="controlVllm('restart')">Restart</button>
+      <button onclick="downloadVllmReport()">Download report</button>
+      <button onclick="toggleVllmLogs()">Logs</button>
       <span id="vllmMsg" class="muted"></span>
     </div>
     <div class="vllm-cards">
@@ -387,6 +468,10 @@ def install():
       <div class="worker-stat">KV cache<b id="vllmKv">—</b></div>
       <div class="worker-stat">Decode live<b id="vllmDecode">—</b></div>
       <div class="worker-stat">Prompt live<b id="vllmPrompt">—</b></div>
+    </div>
+    <div id="vllmLogWrap" class="vllm-log-wrap" style="display:none">
+      <div class="vllm-log-head"><span id="vllmLogPath">vLLM log</span><button onclick="refreshVllmLogs()">Refresh</button></div>
+      <pre id="vllmLogText">Loading…</pre>
     </div>
     <div class="vllm-host-strip">
       <div class="vllm-mini">CPU<b id="vllmCpu">—</b><small id="vllmCpuSub">—</small></div>
@@ -430,6 +515,7 @@ def install():
 .vllm-form{display:grid;grid-template-columns:minmax(260px,2fr) repeat(3,minmax(110px,1fr)) minmax(120px,1fr);gap:8px;align-items:end}
 .vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -529,6 +615,24 @@ async function refreshVllm(){
    }
   }catch(_e){}
  }catch(e){vllmState.textContent='● ERROR';vllmState.className='status error';vllmMsg.textContent='Status error: '+e.message;}
+}
+
+function downloadVllmReport(){
+ window.location.href='/api/vllm/report';
+}
+
+async function refreshVllmLogs(){
+ try{
+  const r=await fetch('/api/vllm/logs');const d=await r.json();
+  vllmLogPath.textContent=d.path||'vLLM log';
+  vllmLogText.textContent=d.log||'(empty)';
+  vllmLogText.scrollTop=vllmLogText.scrollHeight;
+ }catch(e){vllmLogText.textContent='Log error: '+e.message;}
+}
+
+async function toggleVllmLogs(){
+ const w=document.getElementById('vllmLogWrap');
+ if(w.style.display==='none'){w.style.display='block';await refreshVllmLogs();}else{w.style.display='none';}
 }
 
 async function runVllmBench(concurrency){
