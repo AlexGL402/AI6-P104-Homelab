@@ -26,6 +26,8 @@ _VLLM_MODELS_DIR = Path(os.environ.get("AI6_VLLM_MODELS_DIR", str(Path.home() / 
 _VLLM_LOG_DIR = Path(os.environ.get("AI6_VLLM_LOG_DIR", str(Path.home() / ".local/state/ai6-monitor/vllm")))
 _VLLM_DEFAULT_PORT = int(os.environ.get("AI6_VLLM_PORT", "8012"))
 _BENCH_RESULTS = []
+_LAST_PROMPT_RESULT = None
+_LOAD_TIMELINE = {}
 
 
 class VllmStartCommand(BaseModel):
@@ -117,8 +119,10 @@ def _metric_value(text, metric):
 
 
 def _vllm_status():
+    global _LOAD_TIMELINE
     proc = _vllm_process()
     if proc is None:
+        _LOAD_TIMELINE = {}
         return {
             "running": False,
             "ready": False,
@@ -154,6 +158,22 @@ def _vllm_status():
         if entries:
             model_id = entries[0].get("id")
 
+    # Approximate startup-stage timing. Status is polled by the UI, so milestones
+    # are sampled at the dashboard polling cadence rather than instrumented inside vLLM.
+    now_mono = time.monotonic()
+    if _LOAD_TIMELINE.get("pid") != proc.pid:
+        _LOAD_TIMELINE = {"pid": proc.pid, "process_seen": now_mono}
+    try:
+        gpu0 = (base.gpu_stats() or [None])[0] or {}
+        used_gib = float(gpu0.get("memory_used_mib") or 0) / 1024.0
+        for key, threshold in (("weights_started", 0.2), ("weights_mid", 2.0), ("engine_init", 5.0), ("warmup", 6.0)):
+            if used_gib >= threshold and key not in _LOAD_TIMELINE:
+                _LOAD_TIMELINE[key] = now_mono
+    except Exception:
+        pass
+    if health_ok and "ready" not in _LOAD_TIMELINE:
+        _LOAD_TIMELINE["ready"] = now_mono
+
     metrics_text = _http_text(f"http://127.0.0.1:{port}/metrics")
     metrics = {
         "generation_tokens_total": _metric_value(metrics_text, "vllm:generation_tokens_total"),
@@ -175,7 +195,24 @@ def _vllm_status():
         "gpu_memory_utilization": float(_arg_value(cmd, "--gpu-memory-utilization", "0") or 0) or None,
         "enforce_eager": "--enforce-eager" in cmd,
         "metrics": metrics,
+        "load_timeline": _load_timeline_summary(),
     }
+
+
+def _load_timeline_summary():
+    if not _LOAD_TIMELINE:
+        return {}
+    t0 = _LOAD_TIMELINE.get("process_seen")
+    if t0 is None:
+        return {}
+    out = {}
+    for key in ("weights_started", "weights_mid", "engine_init", "warmup", "ready"):
+        if key in _LOAD_TIMELINE:
+            out[key + "_s"] = round(_LOAD_TIMELINE[key] - t0, 2)
+    if "ready" in _LOAD_TIMELINE:
+        out["total_startup_s"] = round(_LOAD_TIMELINE["ready"] - t0, 2)
+    out["sampled"] = True
+    return out
 
 
 def _stop_vllm():
@@ -316,6 +353,7 @@ def _bench_one(port, model, prompt, max_tokens):
 
 @base.app.post("/api/vllm/prompt")
 def api_vllm_prompt(cmd: VllmPromptCommand):
+    global _LAST_PROMPT_RESULT
     status = _vllm_status()
     if not status["ready"]:
         raise base.HTTPException(status_code=409, detail="vLLM server is not ready")
@@ -341,12 +379,21 @@ def api_vllm_prompt(cmd: VllmPromptCommand):
     choice = ((data.get("choices") or [{}])[0].get("message") or {})
     usage = data.get("usage") or {}
     out_tokens = int(usage.get("completion_tokens") or 0)
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    result = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": out_tokens,
+        "elapsed_s": round(elapsed, 3),
+        "output_tok_s": round(out_tokens / elapsed, 2) if elapsed > 0 and out_tokens else 0,
+        "total_tok_s": round((prompt_tokens + out_tokens) / elapsed, 2) if elapsed > 0 else 0,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    _LAST_PROMPT_RESULT = result
     return {
         "ok": True,
         "content": choice.get("content") or "",
         "usage": usage,
-        "elapsed_s": round(elapsed, 3),
-        "output_tok_s": round(out_tokens / elapsed, 2) if elapsed > 0 and out_tokens else 0,
+        **result,
     }
 
 
@@ -386,6 +433,41 @@ def api_vllm_report():
         f"- Context: {status.get('max_model_len') or '-'}",
         f"- GPU memory utilization: {status.get('gpu_memory_utilization') or '-'}",
         f"- Enforce eager: {bool(status.get('enforce_eager'))}",
+        "",
+        "## Startup stages (sampled)",
+    ]
+    timeline = status.get("load_timeline") or {}
+    if timeline:
+        stage_labels = [
+            ("weights_started_s", "Weights started"),
+            ("weights_mid_s", "Weights ~mid-load"),
+            ("engine_init_s", "Engine init"),
+            ("warmup_s", "Warmup"),
+            ("ready_s", "API ready"),
+            ("total_startup_s", "Total startup"),
+        ]
+        for key, label in stage_labels:
+            if key in timeline:
+                lines.append(f"- {label}: {timeline[key]:.2f} s from process detection")
+        lines.append("- Note: startup milestones are sampled by monitor polling / VRAM thresholds, not exact vLLM byte-progress.")
+    else:
+        lines.append("- No startup timeline captured in this monitor session.")
+    lines += [
+        "",
+        "## Last interactive prompt",
+    ]
+    if _LAST_PROMPT_RESULT:
+        p = _LAST_PROMPT_RESULT
+        lines += [
+            f"- Prompt tokens: {p['prompt_tokens']}",
+            f"- Output tokens: {p['completion_tokens']}",
+            f"- Wall time: {p['elapsed_s']:.3f} s",
+            f"- Output throughput: {p['output_tok_s']:.2f} tok/s",
+            f"- Total token throughput: {p['total_tok_s']:.2f} tok/s",
+        ]
+    else:
+        lines.append("- No interactive prompt run recorded in this monitor session.")
+    lines += [
         "",
         "## Host / GPU snapshot",
         f"- CPU: {(stats.get('cpu') or {}).get('usage_pct', '-')} %",
