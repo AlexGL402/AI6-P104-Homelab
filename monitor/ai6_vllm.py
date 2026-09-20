@@ -74,6 +74,7 @@ class VllmBenchmarkCommand(BaseModel):
     max_tokens: int = Field(default=512, ge=16, le=8192)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     prompt_profile: str = Field(default="short")
+    enable_thinking: bool = False
 
 
 class VllmPromptCommand(BaseModel):
@@ -505,13 +506,14 @@ def api_vllm_control(cmd: VllmControlCommand):
     return {"ok": True, **result}
 
 
-def _bench_one(port, model, prompt, max_tokens, temperature=0.0):
+def _bench_one(port, model, prompt, max_tokens, temperature=0.0, enable_thinking=False):
     """Run one streaming request and capture TTFT + exact token usage."""
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
         "stream": True,
         "stream_options": {"include_usage": True},
     }).encode("utf-8")
@@ -730,6 +732,7 @@ def _single_benchmark_report(x):
         f"- Concurrent requests: {x.get('concurrency', '-')}",
         f"- Prompt profile: {x.get('prompt_profile') or '-'}",
         f"- Temperature: {x.get('temperature', '-')}",
+        f"- Thinking: {'ON' if x.get('enable_thinking') else 'OFF'}",
         f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
         f"- Output tokens/request: {x.get('max_tokens', '-')}",
         f"- Output tokens total: {x.get('output_tokens', '-')}",
@@ -936,6 +939,7 @@ def _combined_benchmark_report_html(rows):
             <div><span>Context</span><b>{h(x.get("context") or "-")}</b></div>
             <div><span>Prompt profile</span><b>{h(x.get("prompt_profile") or "-")}</b></div>
             <div><span>Temperature</span><b>{h(x.get("temperature") if x.get("temperature") is not None else "-")}</b></div>
+            <div><span>Thinking</span><b>{'ON' if x.get("enable_thinking") else 'OFF'}</b></div>
             <div><span>Mode</span><b>{h(x.get("mode") or "-")}</b></div>
             <div><span>Prompt tok/s*</span><b>{fmt(x.get("prompt_tok_s_approx"),2)}</b></div>
             <div><span>Decode avg/request</span><b>{fmt(x.get("decode_avg_tok_s"),2)} tok/s</b></div>
@@ -1198,6 +1202,8 @@ def api_vllm_report():
                 f"- Driver: {x.get('driver_version') or '-'}",
                 f"- CUDA runtime: {(x.get('cuda') or {}).get('cuda_runtime') or '-'}",
                 f"- Torch: {(x.get('cuda') or {}).get('torch') or '-'}",
+                f"- Temperature: {x.get('temperature', '-')}",
+                f"- Thinking: {'ON' if x.get('enable_thinking') else 'OFF'}",
                 f"- PCIe: {'; '.join('GPU'+str(p.get('index','?'))+': Gen'+str(p.get('gen_current') or '?')+' x'+str(p.get('width_current') or '?')+' (max Gen'+str(p.get('gen_max') or '?')+' x'+str(p.get('width_max') or '?')+')' for p in (x.get('pcie') or [])) or '-'}",
                 f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
                 f"- Output tokens total: {x.get('output_tokens', '-')}",
@@ -1375,7 +1381,7 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
     samples = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=cmd.concurrency) as pool:
         futures = [
-            pool.submit(_bench_one, port, model, prompt, cmd.max_tokens, cmd.temperature)
+            pool.submit(_bench_one, port, model, prompt, cmd.max_tokens, cmd.temperature, cmd.enable_thinking)
             for prompt in prompts
         ]
         while True:
@@ -1401,6 +1407,7 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "concurrency": cmd.concurrency,
         "max_tokens": cmd.max_tokens,
         "temperature": cmd.temperature,
+        "enable_thinking": bool(cmd.enable_thinking),
         "prompt_profile": cmd.prompt_profile,
         "prompt_tokens": total_prompt_tokens,
         "output_tokens": total_output_tokens,
@@ -1539,6 +1546,7 @@ def install():
       <span>PL <b id="benchPl">—</b></span>
       <span>GPUs <b id="benchGpu">—</b></span>
       <span>vLLM <b id="benchVllm">—</b></span>
+      <span>Thinking <b id="benchThinkingState">OFF</b></span>
     </div>
     <div class="vllm-bench-config">
       <label>Output/request
@@ -1560,6 +1568,12 @@ def install():
       </label>
       <label>Temperature
         <input id="benchTemperature" type="number" value="0" min="0" max="2" step="0.1">
+      </label>
+      <label>Thinking
+        <select id="benchThinking" onchange="syncBenchThinkingBadge()">
+          <option value="off" selected>OFF</option>
+          <option value="on">ON</option>
+        </select>
       </label>
       <label>Custom conc
         <div class="bench-custom-conc"><input id="benchCustomConc" type="number" value="12" min="1" max="128"><button onclick="runVllmBench(Number(benchCustomConc.value))">Run</button></div>
@@ -1624,6 +1638,7 @@ def install():
       <label>Out/req<select id="bfOut" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Prompt size<select id="bfPromptProfile" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>Temp<select id="bfTemp" onchange="renderBenchHistory()"><option value="">all</option></select></label>
+      <label>Thinking<select id="bfThinking" onchange="renderBenchHistory()"><option value="">all</option><option value="off">OFF</option><option value="on">ON</option></select></label>
       <label>PCIe<select id="bfPcie" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>GPUs<select id="bfGpus" onchange="renderBenchHistory()"><option value="">all</option></select></label>
       <label>PL<select id="bfPl" onchange="renderBenchHistory()"><option value="">all</option></select></label>
@@ -1642,13 +1657,13 @@ def install():
       <table class="vllm-table bench-history-table">
         <thead>
           <tr>
-            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Conc</th>
+            <th>✓</th><th>Date</th><th>Model / quant</th><th>GPUs</th><th>PCIe</th><th>Think</th><th>Conc</th>
             <th>Prompt</th><th>Out/req</th><th>TTFT avg/max</th><th>Wall</th>
             <th>Aggregate</th><th>Per req</th><th>PL</th><th>Power avg/peak</th>
             <th>Temp</th><th>Git</th><th>Report</th><th>Comment</th>
           </tr>
         </thead>
-        <tbody id="benchHistoryRows"><tr><td colspan="18" class="muted">Loading benchmark history…</td></tr></tbody>
+        <tbody id="benchHistoryRows"><tr><td colspan="19" class="muted">Loading benchmark history…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1669,7 +1684,7 @@ def install():
 .vllm-bench-config{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin:0 0 10px}.vllm-bench-config label{font-size:10px;color:#999}.vllm-bench-config select,.vllm-bench-config input{display:block;margin-top:3px;padding:6px 8px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}.bench-custom-conc{display:flex;gap:4px}.bench-custom-conc input{width:72px}.bench-custom-conc button{padding:6px 10px}
 .vllm-bench-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.git-upload-btn{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.bench-select{width:16px;height:16px}.bench-comment{width:150px;max-width:22vw;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;padding:4px 6px;font-size:10px}
 .run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
-.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.delete-selected-btn{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}.combined-report-actions{display:inline-flex;gap:5px;margin-left:2px}.combined-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;text-decoration:none;font-weight:900;font-size:15px;border:1px solid #3a3a3a}.combined-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.combined-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.bench-filter-grid{display:grid;grid-template-columns:repeat(12,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
+.bench-history-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}.delete-selected-btn{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}.combined-report-actions{display:inline-flex;gap:5px;margin-left:2px}.combined-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;text-decoration:none;font-weight:900;font-size:15px;border:1px solid #3a3a3a}.combined-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.combined-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.bench-filter-grid{display:grid;grid-template-columns:repeat(13,minmax(90px,1fr));gap:6px;margin-bottom:8px}.bench-filter-grid label{font-size:9px;color:#999}.bench-filter-grid input,.bench-filter-grid select{display:block;width:100%;margin-top:3px;padding:5px 6px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:5px;font-size:10px}.bench-history-wrap{max-height:68vh}.bench-history-table{min-width:1500px}.git-state-ok{color:#72e28a;font-weight:700}.git-state-no{color:#888}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -2067,6 +2082,7 @@ function benchFilters(){
   out:(bfOut.value||'').trim(),
   prompt_profile:(bfPromptProfile.value||'').trim().toLowerCase(),
   temp:(bfTemp.value||'').trim(),
+  thinking:(bfThinking.value||'').trim(),
   pcie:(bfPcie.value||'').trim().toLowerCase(),
   gpus:(bfGpus.value||'').trim().toLowerCase(),
   pl:(bfPl.value||'').trim(),
@@ -2120,7 +2136,7 @@ function renderBenchHistory(){
    const actions=rawId?'<span class="run-report-actions"><a class="run-dl" title="Download report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'—';
    const note=rawId?'<input class="bench-comment" value="'+escHtml(x.comment||'')+'" placeholder="comment…" onblur="saveHistoryComment(\''+runId+'\',this.value)">':'';
    const pcie=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ')||'—';
-   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
+   return '<tr><td>'+sel+'</td><td>'+date+'</td><td>'+mq+'</td><td>'+escHtml(_benchGpuLabel(x))+'</td><td>'+escHtml(pcie)+'</td><td>'+(x.enable_thinking?'ON':'OFF')+'</td><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+ttft+'</td><td>'+Number(x.wall_s||0).toFixed(3)+' s</td><td><b>'+Number(x.aggregate_tok_s||0).toFixed(2)+'</b></td><td>'+per+'</td><td>'+pl+'</td><td>'+pwr+' W</td><td>'+temp+'</td><td>'+git+'</td><td>'+actions+'</td><td>'+note+'</td></tr>';
  }).join('');
 }
 
@@ -2142,19 +2158,21 @@ function setAllHistorySelection(value){
 }
 
 function clearBenchFilters(){
- ['bfDate','bfModel','bfQuant','bfConc','bfOut','bfPromptProfile','bfTemp','bfPcie','bfGpus','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
+ ['bfDate','bfModel','bfQuant','bfConc','bfOut','bfPromptProfile','bfTemp','bfThinking','bfPcie','bfGpus','bfPl','bfComment','bfAgg'].forEach(id=>document.getElementById(id).value='');
  bfGit.value='';
  renderBenchHistory();
 }
 
+function syncBenchThinkingBadge(){const e=document.getElementById('benchThinkingState');if(e)e.textContent=benchThinking.value==='on'?'ON':'OFF';}
 async function runVllmBench(concurrency){
  const out=Number(benchOutTokens.value);
  const temperature=Number(benchTemperature.value);
  const prompt_profile=benchPromptProfile.value;
+ const enable_thinking=benchThinking.value==='on';syncBenchThinkingBadge();
  if(!Number.isInteger(concurrency)||concurrency<1||concurrency>128){vllmBenchMsg.textContent='Concurrency must be 1..128';return;}
- vllmBenchMsg.textContent='Running '+concurrency+' × '+out+' • '+prompt_profile+' prompt…';
+ vllmBenchMsg.textContent='Running '+concurrency+' × '+out+' • '+prompt_profile+' • thinking '+(enable_thinking?'ON':'OFF')+'…';
  try{
-  const payload={concurrency:concurrency,max_tokens:out,temperature:temperature,prompt_profile:prompt_profile};
+  const payload={concurrency:concurrency,max_tokens:out,temperature:temperature,prompt_profile:prompt_profile,enable_thinking:enable_thinking};
   const r=await fetch('/api/vllm/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
   vllmBenchMsg.textContent=concurrency+' × '+out+' = '+d.result.aggregate_tok_s.toFixed(2)+' tok/s • TTFT '+d.result.ttft_avg_s.toFixed(3)+' s';
