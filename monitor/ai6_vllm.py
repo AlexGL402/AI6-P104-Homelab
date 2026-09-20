@@ -46,6 +46,12 @@ class VllmBenchmarkCommand(BaseModel):
     max_tokens: int = Field(default=512, ge=16, le=4096)
 
 
+class VllmPromptCommand(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20000)
+    max_tokens: int = Field(default=512, ge=16, le=4096)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+
+
 def _vllm_process():
     candidates = []
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "username"]):
@@ -308,6 +314,42 @@ def _bench_one(port, model, prompt, max_tokens):
     return tokens, elapsed
 
 
+@base.app.post("/api/vllm/prompt")
+def api_vllm_prompt(cmd: VllmPromptCommand):
+    status = _vllm_status()
+    if not status["ready"]:
+        raise base.HTTPException(status_code=409, detail="vLLM server is not ready")
+    payload = json.dumps({
+        "model": status["model"],
+        "messages": [{"role": "user", "content": cmd.prompt}],
+        "temperature": cmd.temperature,
+        "max_tokens": cmd.max_tokens,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{status['port']}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            data = json.load(r)
+    except Exception as e:
+        raise base.HTTPException(status_code=502, detail=f"vLLM request failed: {e}")
+    elapsed = time.perf_counter() - started
+    choice = ((data.get("choices") or [{}])[0].get("message") or {})
+    usage = data.get("usage") or {}
+    out_tokens = int(usage.get("completion_tokens") or 0)
+    return {
+        "ok": True,
+        "content": choice.get("content") or "",
+        "usage": usage,
+        "elapsed_s": round(elapsed, 3),
+        "output_tok_s": round(out_tokens / elapsed, 2) if elapsed > 0 and out_tokens else 0,
+    }
+
+
 @base.app.get("/api/vllm/logs")
 def api_vllm_logs():
     status = _vllm_status()
@@ -485,6 +527,21 @@ def install():
 
   <div class="section">
     <div class="section-head">
+      <div><div class="section-title">Test Prompt</div><div class="section-sub">Send a real coding/chat task to the running vLLM server</div></div>
+    </div>
+    <textarea id="vllmPromptInput" class="vllm-prompt" placeholder="Paste a test task here...">Write a production-quality Python implementation of an asynchronous HTTP crawler with retries, timeout handling, URL deduplication, SHA256 hashing, logging, graceful shutdown, and type hints.</textarea>
+    <div class="vllm-prompt-actions">
+      <label>Output tokens<input id="vllmPromptTokens" type="number" value="512" min="16" max="4096"></label>
+      <label>Temperature<input id="vllmPromptTemp" type="number" value="0" min="0" max="2" step="0.1"></label>
+      <button onclick="runVllmPrompt()">Run prompt</button>
+      <button onclick="clearVllmPrompt()">Clear output</button>
+      <span id="vllmPromptMsg" class="muted"></span>
+    </div>
+    <pre id="vllmPromptOutput" class="vllm-prompt-output">Response will appear here.</pre>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
       <div><div class="section-title">vLLM Batch Benchmark</div><div class="section-sub">Same server, fixed 512 output tokens per request</div></div>
     </div>
     <div class="vllm-bench-buttons">
@@ -517,6 +574,7 @@ def install():
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vllm-prompt{width:100%;min-height:120px;resize:vertical;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.vllm-prompt-actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:8px}.vllm-prompt-actions label{font-size:10px;color:#aaa}.vllm-prompt-actions input{display:block;width:100px;margin-top:3px;padding:6px}.vllm-prompt-output{margin:10px 0 0;max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#101010;border:1px solid #303030;border-radius:8px;padding:10px;font-size:11px;line-height:1.4;color:#ddd}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -616,6 +674,21 @@ async function refreshVllm(){
   }catch(_e){}
  }catch(e){vllmState.textContent='● ERROR';vllmState.className='status error';vllmMsg.textContent='Status error: '+e.message;}
 }
+
+async function runVllmPrompt(){
+ const prompt=document.getElementById('vllmPromptInput').value.trim();
+ if(!prompt){vllmPromptMsg.textContent='Enter a prompt first';return;}
+ const payload={prompt:prompt,max_tokens:Number(vllmPromptTokens.value),temperature:Number(vllmPromptTemp.value)};
+ vllmPromptMsg.textContent='Running…';vllmPromptOutput.textContent='Generating…';
+ try{
+  const r=await fetch('/api/vllm/prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  vllmPromptOutput.textContent=d.content||'(empty response)';
+  const u=d.usage||{};
+  vllmPromptMsg.textContent=(u.prompt_tokens??'?')+' prompt + '+(u.completion_tokens??'?')+' output • '+d.elapsed_s.toFixed(3)+' s • '+d.output_tok_s.toFixed(2)+' tok/s';
+ }catch(e){vllmPromptOutput.textContent='ERROR: '+e.message;vllmPromptMsg.textContent='Request failed';}
+}
+function clearVllmPrompt(){vllmPromptOutput.textContent='Response will appear here.';vllmPromptMsg.textContent='';}
 
 function downloadVllmReport(){
  window.location.href='/api/vllm/report';
