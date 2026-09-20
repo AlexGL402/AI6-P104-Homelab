@@ -289,3 +289,30 @@ Fan: 36%
 Using the ~86.1 tok/s long-run result and ~148.4 W observed power gives approximately **0.58 tok/s/W**.
 
 All vLLM results above were captured before any capacitor / board-level modification.
+
+
+### Concurrent-request scaling — vLLM continuous batching
+
+All tests below used Qwen3-4B-AWQ with 512 output tokens per request unless noted otherwise. The main scaling series used a 150 W power limit.
+
+| Concurrent requests | Total output tokens | Wall time | Aggregate throughput | Approx. per-request speed | Notes |
+|---:|---:|---:|---:|---:|---|
+| 1 | 1024 | 11.913 s | ~86.0 tok/s | ~86.0 tok/s | Stable long-run single-request baseline |
+| 4 | 2048 | 6.986 s | 293.14 tok/s | ~73.3–73.8 tok/s | GPU load 100% |
+| 8 | 4096 | 8.989 s | 455.65 tok/s | ~57.1 tok/s | 150 W PL; ~151.24 W observed |
+| 16 | 8192 | 13.701 s | 597.93 tok/s | ~37.45 tok/s | 150 W PL; ~148.39 W observed |
+| 32 | 16384 | 22.821 s | 717.92 tok/s | ~22.46–22.55 tok/s | 150 W PL; ~150.26 W observed |
+| 64 | 32768 | 47.306 s | 692.68 tok/s | ~10.83–14.84 tok/s | 150 W PL; ~144.44 W observed; throughput regressed |
+
+The highest aggregate throughput measured so far is **717.92 tok/s at 32 concurrent requests**. Going from 32 to 64 concurrent requests reduced aggregate throughput by about 3.5% while substantially increasing per-request latency, indicating that the useful batching sweet spot is below 64 for this workload.
+
+#### Power-limit A/B at 8 concurrent requests
+
+| Power limit | Observed power | Aggregate throughput | Change vs 150 W |
+|---:|---:|---:|---:|
+| 150 W | ~151.24 W | 455.65 tok/s | baseline |
+| 184 W | ~158.23 W | 458.33 tok/s | +0.6% |
+
+Raising the power limit from 150 W to 184 W produced only a negligible throughput gain. For this workload, 150 W is therefore the more efficient operating point.
+
+All scaling results were captured before any capacitor / board-level modification.
