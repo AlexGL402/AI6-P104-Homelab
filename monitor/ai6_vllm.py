@@ -741,8 +741,11 @@ async function refreshVllm(){
     }
     vllmLoadFill.style.width=pct+'%';vllmLoadPct.textContent=pct+'%';vllmLoadText.textContent=txt;vllmLoadSub.textContent=sub;
   }else if(s.ready){
-    lw.style.display='block';vllmLoadFill.style.width='100%';vllmLoadPct.textContent='100%';vllmLoadText.textContent='Ready';vllmLoadSub.textContent='Model loaded and API ready.';
-    setTimeout(()=>{if(vllmState.textContent.includes('READY'))lw.style.display='none';},1200);
+    lw.style.display='none';
+    vllmLoadFill.style.width='100%';
+    vllmLoadPct.textContent='100%';
+    vllmLoadText.textContent='Ready';
+    vllmLoadSub.textContent='Model loaded and API ready.';
   }else{
     lw.style.display='none';vllmLoadFill.style.width='0%';vllmLoadPct.textContent='0%';
   }
