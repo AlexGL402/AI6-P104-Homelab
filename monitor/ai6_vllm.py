@@ -388,6 +388,14 @@ def install():
       <div class="worker-stat">Decode live<b id="vllmDecode">—</b></div>
       <div class="worker-stat">Prompt live<b id="vllmPrompt">—</b></div>
     </div>
+    <div class="vllm-host-strip">
+      <div class="vllm-mini">CPU<b id="vllmCpu">—</b><small id="vllmCpuSub">—</small></div>
+      <div class="vllm-mini">RAM<b id="vllmRam">—</b><small id="vllmRamSub">—</small></div>
+      <div class="vllm-mini">GPU load<b id="vllmGpuLoad">—</b><small id="vllmGpuName">—</small></div>
+      <div class="vllm-mini">GPU power<b id="vllmGpuPower">—</b><small id="vllmGpuPowerSub">—</small></div>
+      <div class="vllm-mini">VRAM<b id="vllmGpuVram">—</b><small id="vllmGpuVramSub">—</small></div>
+      <div class="vllm-mini">GPU temp<b id="vllmGpuTemp">—</b><small id="vllmGpuFan">—</small></div>
+    </div>
   </div>
 
   <div class="section">
@@ -422,8 +430,9 @@ def install():
 .vllm-form{display:grid;grid-template-columns:minmax(260px,2fr) repeat(3,minmax(110px,1fr)) minmax(120px,1fr);gap:8px;align-items:end}
 .vllm-form label{font-size:11px;color:#aaa}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
-@media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}}
+@media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
     dashboard = dashboard.replace("</style>", css + "\n</style>", 1)
 
@@ -499,6 +508,26 @@ async function refreshVllm(){
   if(m.generation_tokens_total!=null){vllmPrevMetrics={generation_tokens_total:m.generation_tokens_total,prompt_tokens_total:m.prompt_tokens_total||0};vllmPrevTs=now;}
   if(s.port)vllmPort.value=s.port;if(s.max_model_len)vllmCtx.value=s.max_model_len;if(s.gpu_memory_utilization)vllmMem.value=s.gpu_memory_utilization.toFixed(2);vllmEager.checked=!!s.enforce_eager;
   renderVllmBench(s.benchmarks||[]);
+  try{
+   const hr=await fetch('/api/stats');const h=await hr.json();
+   if(hr.ok){
+    vllmCpu.textContent=h.cpu.usage_pct.toFixed(1)+'%';
+    vllmCpuSub.textContent='load '+h.cpu.load_1m.toFixed(2)+' • '+(h.cpu.temperature_c==null?'?':h.cpu.temperature_c.toFixed(0)+'°C');
+    vllmRam.textContent=h.memory.usage_pct.toFixed(1)+'%';
+    vllmRamSub.textContent=(h.memory.used_bytes/1073741824).toFixed(2)+' / '+(h.memory.total_bytes/1073741824).toFixed(2)+' GiB';
+    const g=(h.gpu.devices||[])[0];
+    if(g){
+     vllmGpuLoad.textContent=(g.utilization_pct??'?')+'%';
+     vllmGpuName.textContent=g.name||'GPU #0';
+     vllmGpuPower.textContent=(g.power_w??'?')+' W';
+     vllmGpuPowerSub.textContent='limit '+(g.power_limit_w??'?')+' W';
+     vllmGpuVram.textContent=((g.memory_used_mib||0)/1024).toFixed(2)+' GiB';
+     vllmGpuVramSub.textContent='of '+((g.memory_total_mib||0)/1024).toFixed(2)+' GiB';
+     vllmGpuTemp.textContent=(g.temperature_c??'?')+'°C';
+     vllmGpuFan.textContent=g.fan_pct==null?'fan N/A':'fan '+g.fan_pct+'%';
+    }
+   }
+  }catch(_e){}
  }catch(e){vllmState.textContent='● ERROR';vllmState.className='status error';vllmMsg.textContent='Status error: '+e.message;}
 }
 
