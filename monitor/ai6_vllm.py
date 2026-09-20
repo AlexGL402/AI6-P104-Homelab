@@ -1506,7 +1506,7 @@ def install():
     css = r'''
 .top-tabs{display:flex;gap:8px;margin:14px 0 2px}.tab-btn{padding:8px 16px}.tab-btn.active{border-color:#7be495;color:#7be495;background:#172019}
 .vllm-form{display:grid;grid-template-columns:minmax(250px,2fr) repeat(3,minmax(105px,1fr)) minmax(120px,1fr) minmax(300px,1.5fr);gap:8px;align-items:end}
-.vllm-form label{font-size:11px;color:#aaa}.vllm-gpu-select{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}.vllm-gpu-choice{display:flex!important;align-items:center;gap:3px;background:#151515;border:1px solid #333;border-radius:6px;padding:5px 7px!important;color:#ddd!important;font-size:10px!important}.vllm-gpu-choice input{width:auto!important;margin:0!important}.vllm-gpu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px;margin-top:8px}.vllm-gpu-card{background:#171717;border:1px solid #303030;border-radius:9px;padding:9px}.vllm-gpu-card-head{display:flex;justify-content:space-between;gap:8px}.vllm-gpu-card-head b{font-size:12px}.vllm-gpu-card-head span{font-size:10px;color:#999}.vllm-gpu-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:7px}.vllm-gpu-stats div{font-size:9px;color:#999}.vllm-gpu-stats b{display:block;color:#eee;font-size:13px}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-model-row{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px;align-items:end}.vllm-model-row button{height:32px;padding:0}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
+.vllm-form label{font-size:11px;color:#aaa}.vllm-gpu-select{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}.vllm-gpu-choice{display:flex!important;align-items:center;gap:3px;background:#151515;border:1px solid #333;border-radius:6px;padding:5px 7px!important;color:#ddd!important;font-size:10px!important}.vllm-gpu-choice input{width:auto!important;margin:0!important}.vllm-gpu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px;margin-top:8px}.vllm-gpu-card{background:#171717;border:1px solid #303030;border-radius:9px;padding:9px}.vllm-gpu-card-head{display:flex;justify-content:space-between;gap:8px}.vllm-gpu-card-head b{font-size:12px}.vllm-gpu-card-head span{font-size:10px;color:#999}.vllm-gpu-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:7px}.vllm-gpu-stats div{font-size:9px;color:#999}.vllm-gpu-stats b{display:block;color:#eee;font-size:13px}.vllm-gpu-stats b.ok{color:var(--ok)}.vllm-gpu-stats b.warn{color:var(--warn)}.vllm-gpu-stats b.bad{color:var(--bad)}.vllm-gpu-card.selected{border-color:#3d7d4c;box-shadow:0 0 0 1px rgba(115,226,139,.12) inset}.vllm-form select,.vllm-form input{display:block;width:100%;margin-top:4px;padding:7px}.vllm-model-row{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px;align-items:end}.vllm-model-row button{height:32px;padding:0}.vllm-pl-row{display:grid;grid-template-columns:90px 90px 58px;gap:5px;align-items:end}.vllm-pl-row select,.vllm-pl-row input{margin-top:4px!important}.vllm-pl-row button{padding:7px 8px}.vllm-form label small{display:block;margin-top:3px;color:#777;font-size:9px}.vllm-check{display:flex!important;align-items:center;gap:7px;padding:7px 4px}.vllm-check input{width:auto!important;margin:0!important}
 .vllm-load-wrap{margin-top:10px}.vllm-load-line{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#bbb}.vllm-load-bar{height:9px;background:#2b2b2b;border:1px solid #383838;border-radius:6px;overflow:hidden;margin-top:5px}.vllm-load-fill{height:100%;width:0%;background:#8a8a8a;transition:width .35s ease}.vllm-load-sub{font-size:10px;color:#888;margin-top:4px}
 .vllm-actions,.vllm-bench-buttons{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}.vllm-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:12px}.vllm-cards .worker-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
@@ -1559,14 +1559,24 @@ function renderVllmGpuGrid(devices,selectedIds){
  if(!grid)return;
  grid.innerHTML=(devices||[]).map((g,i)=>{
    const selected=(selectedIds||[]).includes(i);
-   const load=g.utilization_pct??0, temp=g.temperature_c, used=(g.memory_used_mib||0)/1024,total=(g.memory_total_mib||0)/1024;
+   const load=g.utilization_pct??0;
+   const temp=g.temperature_c;
+   const used=(g.memory_used_mib||0)/1024,total=(g.memory_total_mib||0)/1024;
+   const power=Number(g.power_w||0),pl=Number(g.power_limit_w||0);
+   const vramRatio=total?used/total:0;
+   const powerRatio=pl?power/pl:0;
+
+   const loadClass=load>=90?'ok':load>=50?'warn':'';
+   const powerClass=powerRatio>=1.0?'bad':powerRatio>=0.90?'warn':'ok';
+   const vramClass=vramRatio>=0.95?'bad':vramRatio>=0.85?'warn':'ok';
    const tempClass=temp==null?'':cls(temp);
+
    return '<div class="vllm-gpu-card'+(selected?' selected':'')+'">'+
      '<div class="vllm-gpu-card-head"><b>#'+i+' '+escHtml(g.name||'GPU')+'</b><span>'+(selected?'vLLM selected':'available')+'</span></div>'+
      '<div class="vllm-gpu-stats">'+
-       '<div>Load<b>'+load+'%</b></div>'+
-       '<div>Power<b>'+(g.power_w??'?')+' W</b><span> / '+(g.power_limit_w??'?')+' W</span></div>'+
-       '<div>VRAM<b>'+used.toFixed(2)+' / '+total.toFixed(2)+' GiB</b></div>'+
+       '<div>Load<b class="'+loadClass+'">'+load+'%</b></div>'+
+       '<div>Power<b class="'+powerClass+'">'+(g.power_w??'?')+' W</b><span> / '+(g.power_limit_w??'?')+' W</span></div>'+
+       '<div>VRAM<b class="'+vramClass+'">'+used.toFixed(2)+' / '+total.toFixed(2)+' GiB</b></div>'+
        '<div>Temp<b class="'+tempClass+'">'+(temp??'?')+'°C</b><span> fan '+(g.fan_pct??'?')+'%</span></div>'+
      '</div></div>';
  }).join('');
