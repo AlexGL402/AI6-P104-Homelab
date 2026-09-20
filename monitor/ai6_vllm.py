@@ -360,9 +360,10 @@ def api_set_gpu_power_limit(cmd: GpuPowerLimitCommand):
             detail=f"power limit must be {info['min_w']:.0f}..{info['max_w']:.0f} W",
         )
 
+    helper = "/usr/local/sbin/ai6-gpuctl"
     attempts = [
         ["nvidia-smi", "-i", str(cmd.gpu), "-pl", f"{cmd.watts:.0f}"],
-        ["sudo", "-n", "nvidia-smi", "-i", str(cmd.gpu), "-pl", f"{cmd.watts:.0f}"],
+        ["sudo", "-n", helper, "power-limit", str(cmd.gpu), f"{cmd.watts:.0f}"],
     ]
     last_error = ""
     for args in attempts:
@@ -379,7 +380,7 @@ def api_set_gpu_power_limit(cmd: GpuPowerLimitCommand):
         status_code=403,
         detail=(
             "failed to set power limit: " + (last_error or "permission denied") +
-            ". The monitor user may need passwordless permission for nvidia-smi -pl."
+            ". Install the restricted AI6 GPU helper with monitor/install-gpu-control.sh."
         ),
     )
 
@@ -559,6 +560,73 @@ def api_vllm_logs():
     except Exception as e:
         text = f"Failed to read log: {e}"
     return {"ok": True, "path": str(log_path), "log": text}
+
+
+def _single_benchmark_report(x):
+    eff = None
+    if x.get("gpu_power_avg_w") and x.get("aggregate_tok_s"):
+        eff = x["aggregate_tok_s"] / x["gpu_power_avg_w"]
+    lines = [
+        "# AI6 vLLM benchmark run",
+        "",
+        f"Run ID: {x.get('run_id', '-')}",
+        f"Timestamp: {x.get('timestamp', '-')}",
+        "",
+        "## Model / runtime",
+        f"- Model: {x.get('model') or '-'}",
+        f"- Quantization: {x.get('quantization') or '-'}",
+        f"- Context: {x.get('context') or '-'}",
+        f"- Mode: {x.get('mode') or '-'}",
+        f"- vLLM: {x.get('vllm_version') or '-'}",
+        "",
+        "## Request shape",
+        f"- Concurrent requests: {x.get('concurrency', '-')}",
+        f"- Prompt tokens total: {x.get('prompt_tokens', '-')}",
+        f"- Output tokens/request: {x.get('max_tokens', '-')}",
+        f"- Output tokens total: {x.get('output_tokens', '-')}",
+        f"- Total tokens: {x.get('total_tokens', '-')}",
+        "",
+        "## Latency / throughput",
+        f"- TTFT average: {x.get('ttft_avg_s', 0):.3f} s",
+        f"- TTFT max: {x.get('ttft_max_s', 0):.3f} s",
+        f"- Approx. prompt throughput: {x.get('prompt_tok_s_approx', 0):.2f} tok/s",
+        f"- Wall time: {x.get('wall_s', 0):.3f} s",
+        f"- Aggregate output throughput: {x.get('aggregate_tok_s', 0):.2f} tok/s",
+        f"- Per-request output throughput: {x.get('per_request_min_tok_s', 0):.2f}-{x.get('per_request_max_tok_s', 0):.2f} tok/s",
+        f"- Average decode speed/request: {x.get('decode_avg_tok_s', 0):.2f} tok/s",
+        "",
+        "## Telemetry",
+        f"- Average GPU load: {x.get('gpu_load_avg_pct') if x.get('gpu_load_avg_pct') is not None else '-'} %",
+        f"- Peak GPU load: {x.get('gpu_load_peak_pct') if x.get('gpu_load_peak_pct') is not None else '-'} %",
+        f"- Average GPU power: {x.get('gpu_power_avg_w') if x.get('gpu_power_avg_w') is not None else '-'} W",
+        f"- Peak GPU power: {x.get('gpu_power_peak_w') if x.get('gpu_power_peak_w') is not None else '-'} W",
+        f"- Power limit: {x.get('gpu_power_limit_w') if x.get('gpu_power_limit_w') is not None else '-'} W",
+        f"- Peak VRAM: {round((x.get('gpu_vram_peak_mib') or 0)/1024, 2) if x.get('gpu_vram_peak_mib') is not None else '-'} GiB",
+        f"- Peak temperature: {x.get('gpu_temp_peak_c') if x.get('gpu_temp_peak_c') is not None else '-'} C",
+        f"- Peak fan: {x.get('gpu_fan_peak_pct') if x.get('gpu_fan_peak_pct') is not None else '-'} %",
+        f"- Average CPU: {x.get('cpu_avg_pct') if x.get('cpu_avg_pct') is not None else '-'} %",
+        f"- Average RAM: {x.get('ram_avg_pct') if x.get('ram_avg_pct') is not None else '-'} %",
+        f"- Efficiency: {eff:.3f} aggregate tok/s/W" if eff is not None else "- Efficiency: -",
+        f"- Telemetry samples: {x.get('sample_count', 0)}",
+        "",
+        "*Prompt tok/s is approximate: total prompt tokens divided by the slowest TTFT in the batch; TTFT includes queueing and first-token overhead.*",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+@base.app.get("/api/vllm/report/run/{run_id}")
+def api_vllm_run_report(run_id: str, download: int = 0):
+    row = next((x for x in _BENCH_RESULTS if x.get("run_id") == run_id), None)
+    if row is None:
+        raise base.HTTPException(status_code=404, detail="benchmark run not found")
+    body = _single_benchmark_report(row)
+    headers = {}
+    if download:
+        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", row.get("model") or "model")
+        filename = f"vllm-{safe_model}-{row.get('concurrency','x')}x{row.get('max_tokens','x')}-{run_id}.md"
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return PlainTextResponse(body, media_type="text/markdown; charset=utf-8", headers=headers)
 
 
 @base.app.get("/api/vllm/report")
@@ -791,6 +859,7 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
     prompt_window = max(ttfts) if ttfts else 0.0
     prompt_tok_s_approx = total_prompt_tokens / prompt_window if prompt_window > 0 else 0.0
     row = {
+        "run_id": f"{int(time.time())}-{cmd.concurrency}-{cmd.max_tokens}",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "concurrency": cmd.concurrency,
         "max_tokens": cmd.max_tokens,
@@ -961,6 +1030,7 @@ def install():
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini b.ok{color:var(--ok)}.vllm-mini b.warn{color:var(--warn)}.vllm-mini b.bad{color:var(--bad)}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-prompt{width:100%;min-height:120px;resize:vertical;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.vllm-prompt-actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:8px}.vllm-prompt-actions label{font-size:10px;color:#aaa}.vllm-prompt-actions input{display:block;width:100px;margin-top:3px;padding:6px}.vllm-prompt-output{margin:10px 0 0;max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#101010;border:1px solid #303030;border-radius:8px;padding:10px;font-size:11px;line-height:1.4;color:#ddd}
 .vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
+.run-report-actions{display:inline-flex;gap:4px;margin-left:6px;vertical-align:middle}.run-report-actions a{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;text-decoration:none;font-weight:800;font-size:12px;border:1px solid #3a3a3a}.run-report-actions a.run-dl{color:#72e28a;border-color:#2f7540;background:#132519}.run-report-actions a.run-open{color:#76b9ff;border-color:#2d5f91;background:#122235}.run-report-actions a:hover{filter:brightness(1.2)}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -1066,7 +1136,9 @@ function renderVllmBench(rows){
    const mq=(x.model||'—')+' / '+(x.quantization||'—');
    const ttft=(x.ttft_avg_s??0).toFixed(3)+' / '+(x.ttft_max_s??0).toFixed(3)+' s';
    const promptRate=(x.prompt_tok_s_approx??0).toFixed(1);
-   return '<tr><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+'</td></tr>';
+   const runId=encodeURIComponent(x.run_id||'');
+   const actions=x.run_id?'<span class="run-report-actions"><a class="run-dl" title="Download this run report" href="/api/vllm/report/run/'+runId+'?download=1">↓</a><a class="run-open" title="Open this run report" target="_blank" href="/api/vllm/report/run/'+runId+'">↗</a></span>':'';
+   return '<tr><td>'+x.concurrency+'</td><td>'+(x.prompt_tokens??'—')+'</td><td>'+x.max_tokens+'</td><td>'+x.total_tokens+'</td><td>'+ttft+'</td><td>'+promptRate+'</td><td>'+x.wall_s.toFixed(3)+' s</td><td><b>'+x.aggregate_tok_s.toFixed(2)+' tok/s</b></td><td>'+x.per_request_min_tok_s.toFixed(2)+'–'+x.per_request_max_tok_s.toFixed(2)+' tok/s</td><td>'+mq+actions+'</td></tr>';
  }).join('');
 }
 
