@@ -706,6 +706,104 @@ def _gpu_config_label(x):
     return f"{count} GPU(s): " + ", ".join(f"GPU{i}" for i in ids)
 
 
+def _read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _host_platform_info():
+    """Best-effort host metadata for benchmark reproducibility."""
+    cpu_model = ""
+    try:
+        for line in _read_text("/proc/cpuinfo").splitlines():
+            if line.lower().startswith("model name"):
+                cpu_model = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+
+    logical = psutil.cpu_count(logical=True)
+    physical = psutil.cpu_count(logical=False)
+    sockets = None
+    try:
+        p = subprocess.run(["lscpu", "-J"], capture_output=True, text=True, timeout=2.0)
+        if p.returncode == 0:
+            data = json.loads(p.stdout)
+            kv = {str(x.get("field","")).rstrip(":"): str(x.get("data","")) for x in data.get("lscpu", [])}
+            sockets = int(kv.get("Socket(s)", "0") or 0) or None
+            cpu_model = cpu_model or kv.get("Model name", "")
+    except Exception:
+        pass
+
+    vendor = _read_text("/sys/devices/virtual/dmi/id/sys_vendor")
+    product = _read_text("/sys/devices/virtual/dmi/id/product_name")
+    board_vendor = _read_text("/sys/devices/virtual/dmi/id/board_vendor")
+    board_name = _read_text("/sys/devices/virtual/dmi/id/board_name")
+
+    os_name = ""
+    try:
+        vals = {}
+        for line in _read_text("/etc/os-release").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                vals[k] = v.strip().strip('"')
+        os_name = vals.get("PRETTY_NAME") or vals.get("NAME") or ""
+    except Exception:
+        pass
+
+    ram_total_gib = round(psutil.virtual_memory().total / (1024**3), 2)
+    ram_desc = ""
+    ram_speed = ""
+    # lshw sometimes exposes type/clock without root; keep best-effort only.
+    try:
+        p = subprocess.run(
+            ["lshw", "-class", "memory"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        txt = (p.stdout or "") + "\n" + (p.stderr or "")
+        types = sorted(set(re.findall(r"\b(?:DDR[2-5]|LPDDR[3-5]|SDRAM)\b", txt, re.I)))
+        clocks = sorted(set(re.findall(r"clock:\s*([^\n]+)", txt, re.I)))
+        if types:
+            ram_desc = ", ".join(types)
+        if clocks:
+            ram_speed = ", ".join(clocks[:4])
+    except Exception:
+        pass
+
+    return {
+        "cpu_model": cpu_model or None,
+        "cpu_sockets": sockets,
+        "cpu_physical_cores": physical,
+        "cpu_logical_threads": logical,
+        "ram_total_gib": ram_total_gib,
+        "ram_type": ram_desc or None,
+        "ram_speed": ram_speed or None,
+        "system_vendor": vendor or None,
+        "product_name": product or None,
+        "board_vendor": board_vendor or None,
+        "board_name": board_name or None,
+        "os": os_name or None,
+        "kernel": os.uname().release if hasattr(os, "uname") else None,
+    }
+
+
+def _host_label(host):
+    host = host or {}
+    bits = [host.get("system_vendor"), host.get("product_name")]
+    return " ".join(str(x) for x in bits if x) or "-"
+
+
+def _host_for_report(x):
+    host = x.get("host") if isinstance(x.get("host"), dict) else None
+    if host:
+        return host, "recorded with run"
+    # Legacy rows predate host metadata. Current snapshot is shown explicitly,
+    # never silently represented as historical metadata.
+    return _host_platform_info(), "current host snapshot (legacy run; not stored at run time)"
+
+
 def _single_benchmark_report(x):
     eff = None
     if x.get("gpu_power_avg_w") and x.get("aggregate_tok_s"):
@@ -728,6 +826,22 @@ def _single_benchmark_report(x):
         f"- NVIDIA driver: {x.get('driver_version') or '-'}",
         f"- Torch: {(x.get('cuda') or {}).get('torch') or '-'}",
         f"- CUDA runtime: {(x.get('cuda') or {}).get('cuda_runtime') or '-'}",
+        "",
+        "## Host platform",
+    ]
+    host, host_source = _host_for_report(x)
+    lines += [
+        f"- Metadata source: {host_source}",
+        f"- Platform: {_host_label(host)}",
+        f"- Board: {' '.join(str(v) for v in [host.get('board_vendor'), host.get('board_name')] if v) or '-'}",
+        f"- CPU: {host.get('cpu_model') or '-'}",
+        f"- CPU sockets: {host.get('cpu_sockets') or '-'}",
+        f"- CPU cores / threads: {host.get('cpu_physical_cores') or '-'} / {host.get('cpu_logical_threads') or '-'}",
+        f"- RAM: {host.get('ram_total_gib') or '-'} GiB"
+           + (f" • {host.get('ram_type')}" if host.get('ram_type') else "")
+           + (f" • {host.get('ram_speed')}" if host.get('ram_speed') else ""),
+        f"- OS: {host.get('os') or '-'}",
+        f"- Kernel: {host.get('kernel') or '-'}",
         "",
         "## Request shape",
         f"- Concurrent requests: {x.get('concurrency', '-')}",
@@ -775,6 +889,8 @@ def _single_benchmark_report(x):
         f"- Peak temperature: {x.get('gpu_temp_peak_c') if x.get('gpu_temp_peak_c') is not None else '-'} C",
         f"- Peak fan: {x.get('gpu_fan_peak_pct') if x.get('gpu_fan_peak_pct') is not None else '-'} %",
         f"- Average CPU: {x.get('cpu_avg_pct') if x.get('cpu_avg_pct') is not None else '-'} %",
+        "- CPU contribution to token generation: not directly separable from utilization telemetry; "
+        "CPU load includes scheduling, tokenization, API/runtime work and does not equal a percentage of generated tokens.",
         f"- Average RAM: {x.get('ram_avg_pct') if x.get('ram_avg_pct') is not None else '-'} %",
         f"- Efficiency: {eff:.3f} aggregate tok/s/W" if eff is not None else "- Efficiency: -",
         f"- Telemetry samples: {x.get('sample_count', 0)}",
@@ -932,6 +1048,7 @@ def _combined_benchmark_report_html(rows):
 
     detail_sections = []
     for i, x in enumerate(rows, 1):
+        host, host_source = _host_for_report(x)
         avg_p = x.get("gpu_power_avg_w")
         eff = (float(x.get("aggregate_tok_s") or 0) / float(avg_p)) if avg_p else None
         detail_sections.append(f"""
@@ -956,8 +1073,13 @@ def _combined_benchmark_report_html(rows):
             <div><span>GPU load avg/peak</span><b>{fmt(x.get("gpu_load_avg_pct"),1)} / {fmt(x.get("gpu_load_peak_pct"),1)}%</b></div>
             <div><span>VRAM peak</span><b>{fmt((x.get("gpu_vram_peak_mib") or 0)/1024,2)} GiB</b></div>
             <div><span>Fan peak</span><b>{fmt(x.get("gpu_fan_peak_pct"),0)}%</b></div>
-            <div><span>CPU avg</span><b>{fmt(x.get("cpu_avg_pct"),1)}%</b></div>
+            <div class="host-card"><span>Host platform</span><b>{h(_host_label(host))}</b><small>{h(host_source)}</small></div>
+            <div class="host-card"><span>CPU</span><b>{h(host.get("cpu_model") or "-")}</b><small>{h(host.get("cpu_physical_cores") or "-")} cores / {h(host.get("cpu_logical_threads") or "-")} threads • {h(host.get("cpu_sockets") or "-")} socket(s)</small></div>
+            <div class="host-card"><span>RAM</span><b>{fmt(host.get("ram_total_gib"),2)} GiB</b><small>{h(host.get("ram_type") or "type n/a")} • {h(host.get("ram_speed") or "speed n/a")}</small></div>
+            <div class="host-card"><span>OS / kernel</span><b>{h(host.get("os") or "-")}</b><small>{h(host.get("kernel") or "-")}</small></div>
+            <div><span>CPU avg</span><b>{fmt(x.get("cpu_avg_pct"),1)}%</b><small>activity, not token contribution</small></div>
             <div><span>RAM avg</span><b>{fmt(x.get("ram_avg_pct"),1)}%</b></div>
+            <div><span>CPU role</span><b>Scheduling / tokenization / runtime</b><small>Exact % contribution to tok/s is not derivable from CPU utilization alone.</small></div>
             <div><span>Efficiency</span><b>{fmt(eff,3) if eff is not None else "-"} tok/s/W</b></div>
             <div><span>Comment</span><b>{h(x.get("comment") or "-")}</b></div>
           </div>
@@ -969,7 +1091,7 @@ def _combined_benchmark_report_html(rows):
 <meta charset="utf-8">
 <title>AI6 vLLM selected benchmark report</title>
 <style>
-:root{{--bg:#0f0f10;--panel:#18191b;--line:#303236;--text:#ececec;--muted:#9ba0a6;--green:#73e28b;--blue:#79bfff}}
+:root{{--bg:#0f0f10;--panel:#18191b;--line:#303236;--text:#ececec;--muted:#9ba0a6;--green:#73e28b;--blue:#79bfff;--detail-min:190px}}
 *{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Arial,sans-serif}}
 .wrap{{max-width:1800px;margin:0 auto;padding:24px}} h1{{margin:0 0 4px;font-size:24px}} .meta{{color:var(--muted);margin-bottom:18px}}
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:14px 0 18px}}
@@ -978,7 +1100,8 @@ def _combined_benchmark_report_html(rows):
 th,td{{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}} th{{position:sticky;top:0;background:#202226;color:#c9cdd1;font-size:12px;z-index:1}}
 tbody tr:nth-child(even){{background:#141516}} tbody tr:hover{{background:#22252a}} .nowrap{{white-space:nowrap}} .sub{{color:var(--muted);font-size:11px;margin-top:2px}} .hot{{color:var(--green);font-weight:700}} .comment{{min-width:160px;max-width:260px;white-space:normal}} .profile{{display:inline-flex;align-items:center;justify-content:center;width:21px;height:21px;border-radius:999px;font-weight:800;margin-right:6px}} .profile.short{{color:#8ee7a0;background:#16311d;border:1px solid #2d7140}} .profile.medium{{color:#ffd56a;background:#332a11;border:1px solid #7f681f}} .profile.long{{color:#ff8c8c;background:#351818;border:1px solid #7d3131}} .profile-name{{color:var(--muted);font-size:11px}}
 details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px}} summary{{cursor:pointer;font-weight:700}}
-.detail-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px}} .detail-grid>div{{background:#121315;border:1px solid #292b2f;border-radius:7px;padding:8px}} .detail-grid span{{display:block;color:var(--muted);font-size:11px}} .detail-grid b{{display:block;margin-top:2px}}
+.details-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-top:18px}} .details-head h2{{margin:0}} .detail-width-controls{{display:flex;gap:5px;align-items:center;color:var(--muted);font-size:11px}} .detail-width-controls button{{background:#17191c;color:#cfd3d7;border:1px solid var(--line);border-radius:6px;padding:5px 8px;cursor:pointer}} .detail-width-controls button.active{{color:var(--green);border-color:#3d7d4c;background:#172019}}
+.detail-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(var(--detail-min),1fr));gap:8px;margin-top:10px}} .detail-grid>div{{background:#121315;border:1px solid #292b2f;border-radius:7px;padding:8px;min-width:0}} .detail-grid span{{display:block;color:var(--muted);font-size:11px}} .detail-grid b{{display:block;margin-top:2px;overflow-wrap:anywhere}} .detail-grid small{{display:block;color:#7f858b;font-size:10px;margin-top:3px;line-height:1.25}} .host-card{{border-color:#334250!important}}
 .note{{color:var(--muted);font-size:12px;margin-top:12px}}
 </style>
 </head>
@@ -992,9 +1115,16 @@ details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);bo
 </tr></thead>
 <tbody>{''.join(body_rows)}</tbody>
 </table></div>
-<div class="note">* Prompt tok/s is approximate because TTFT includes queueing and first-token overhead.</div>
-<h2>Run details</h2>
+<div class="note">* Prompt tok/s is approximate because TTFT includes queueing and first-token overhead. CPU utilization is activity telemetry, not a direct percentage contribution to token generation. Legacy runs show the current host snapshot explicitly marked as not recorded at run time.</div>
+<div class="details-head"><h2>Run details</h2><div class="detail-width-controls"><span>Card width</span><button type="button" onclick="setDetailWidth('compact')">Compact</button><button type="button" class="active" onclick="setDetailWidth('normal')">Normal</button><button type="button" onclick="setDetailWidth('wide')">Wide</button></div></div>
 {''.join(detail_sections)}
+<script>
+function setDetailWidth(mode){
+  const widths={compact:'150px',normal:'190px',wide:'270px'};
+  document.documentElement.style.setProperty('--detail-min',widths[mode]||widths.normal);
+  document.querySelectorAll('.detail-width-controls button').forEach(b=>b.classList.toggle('active',b.textContent.toLowerCase()===mode));
+}
+</script>
 </div></body></html>"""
 
 
@@ -1445,6 +1575,7 @@ def api_vllm_benchmark(cmd: VllmBenchmarkCommand):
         "context": status.get("max_model_len"),
         "mode": "eager" if status.get("enforce_eager") else "compiled/graphs",
         "vllm_version": status.get("vllm_version"),
+        "host": _host_platform_info(),
         **_system_cuda_info(),
         "pcie": [_pcie_info_for_gpu(i) for i in (status.get("gpu_ids") or [0])],
         **_summarize_bench_samples(samples, status.get("gpu_ids") or [0]),
