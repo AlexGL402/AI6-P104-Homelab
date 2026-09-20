@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from importlib.metadata import version as package_version, PackageNotFoundError
 
 import psutil
 from pydantic import BaseModel, Field
@@ -28,6 +29,11 @@ _VLLM_DEFAULT_PORT = int(os.environ.get("AI6_VLLM_PORT", "8012"))
 _BENCH_RESULTS = []
 _LAST_PROMPT_RESULT = None
 _LOAD_TIMELINE = {}
+
+try:
+    _VLLM_VERSION = package_version("vllm")
+except PackageNotFoundError:
+    _VLLM_VERSION = "unknown"
 
 
 class VllmStartCommand(BaseModel):
@@ -78,6 +84,24 @@ def _arg_value(cmdline, flag, default=None):
         if arg.startswith(prefix):
             return arg[len(prefix):]
     return default
+
+
+def _model_quantization(model_path):
+    if not model_path:
+        return None
+    try:
+        cfg = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
+        q = cfg.get("quantization_config") or {}
+        method = q.get("quant_method") or q.get("quantization_method")
+        if method:
+            return str(method).upper()
+        name = Path(model_path).name.upper()
+        for token in ("AWQ", "GPTQ", "FP8", "INT8", "INT4"):
+            if token in name:
+                return token
+    except Exception:
+        pass
+    return None
 
 
 def _validate_vllm_model(model_text):
@@ -196,6 +220,8 @@ def _vllm_status():
         "enforce_eager": "--enforce-eager" in cmd,
         "metrics": metrics,
         "load_timeline": _load_timeline_summary(),
+        "quantization": _model_quantization(model_path),
+        "vllm_version": _VLLM_VERSION,
     }
 
 
@@ -631,6 +657,15 @@ def install():
     <div class="section-head">
       <div><div class="section-title">vLLM Batch Benchmark</div><div class="section-sub">Same server, fixed 512 output tokens per request</div></div>
     </div>
+    <div class="vllm-bench-meta">
+      <span>Model <b id="benchModel">—</b></span>
+      <span>Quant <b id="benchQuant">—</b></span>
+      <span>Context <b id="benchCtx">—</b></span>
+      <span>Mode <b id="benchMode">—</b></span>
+      <span>PL <b id="benchPl">—</b></span>
+      <span>GPU <b id="benchGpu">—</b></span>
+      <span>vLLM <b id="benchVllm">—</b></span>
+    </div>
     <div class="vllm-bench-buttons">
       <button onclick="runVllmBench(1)">1</button>
       <button onclick="runVllmBench(4)">4</button>
@@ -663,6 +698,7 @@ def install():
 .vllm-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.vllm-log-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:#888}.vllm-log-head button{padding:4px 8px;font-size:10px}.vllm-log-wrap pre{margin:7px 0 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
 .vllm-host-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px;margin-top:9px}.vllm-mini{background:#171717;border:1px solid #303030;border-radius:8px;padding:7px 9px;font-size:10px;color:#aaa;min-width:0}.vllm-mini b{display:block;margin-top:2px;font-size:17px;line-height:1.15;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.vllm-mini small{display:block;margin-top:2px;color:#888;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .vllm-prompt{width:100%;min-height:120px;resize:vertical;background:#111;color:#eee;border:1px solid #444;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.vllm-prompt-actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:8px}.vllm-prompt-actions label{font-size:10px;color:#aaa}.vllm-prompt-actions input{display:block;width:100px;margin-top:3px;padding:6px}.vllm-prompt-output{margin:10px 0 0;max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#101010;border:1px solid #303030;border-radius:8px;padding:10px;font-size:11px;line-height:1.4;color:#ddd}
+.vllm-bench-meta{display:flex;gap:7px;flex-wrap:wrap;margin:2px 0 10px}.vllm-bench-meta span{background:#171717;border:1px solid #303030;border-radius:7px;padding:5px 7px;font-size:10px;color:#999}.vllm-bench-meta b{color:#eee;font-weight:700;margin-left:3px}
 .vllm-table-wrap{overflow:auto;margin-top:10px}.vllm-table th,.vllm-table td{text-align:left;padding:7px 8px;border-bottom:1px solid #2d2d2d}.vllm-table th{color:#bbb;font-size:11px}.vllm-table td{font-size:12px}
 @media(max-width:900px){.vllm-form{grid-template-columns:1fr 1fr}.vllm-host-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:560px){.vllm-host-strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
 '''
@@ -762,6 +798,11 @@ async function refreshVllm(){
   if(m.generation_tokens_total!=null){vllmPrevMetrics={generation_tokens_total:m.generation_tokens_total,prompt_tokens_total:m.prompt_tokens_total||0};vllmPrevTs=now;}
   if(s.port)vllmPort.value=s.port;if(s.max_model_len)vllmCtx.value=s.max_model_len;if(s.gpu_memory_utilization)vllmMem.value=s.gpu_memory_utilization.toFixed(2);vllmEager.checked=!!s.enforce_eager;
   renderVllmBench(s.benchmarks||[]);
+  benchModel.textContent=(s.model||'—').split('/').pop();
+  benchQuant.textContent=s.quantization||'—';
+  benchCtx.textContent=s.max_model_len?Number(s.max_model_len).toLocaleString():'—';
+  benchMode.textContent=s.enforce_eager?'eager':'compiled/graphs';
+  benchVllm.textContent=s.vllm_version||'—';
   try{
    const hr=await fetch('/api/stats');const h=await hr.json();
    if(hr.ok){
@@ -781,6 +822,8 @@ async function refreshVllm(){
      vllmGpuTemp.textContent=(gt??'?')+'°C';
      vllmGpuTemp.className=gt==null?'':cls(gt);
      vllmGpuFan.textContent=g.fan_pct==null?'fan N/A':'fan '+g.fan_pct+'%';
+     benchPl.textContent=(g.power_limit_w??'?')+' W';
+     benchGpu.textContent=g.name||'GPU #0';
     }
    }
   }catch(_e){}
