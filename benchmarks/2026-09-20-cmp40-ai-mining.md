@@ -210,3 +210,82 @@ total time    : 31.753 s
 On this test, CMP 40HX prompt processing is about 5.8% lower than the saved P104 x4 result, while generation is about 61.2% higher (1.61x). The model is fully GPU-resident according to `ollama ps`, making this a much more representative GPU comparison than the partially-offloaded Qwen3 14B test.
 
 This result was captured before any capacitor / board-level modification.
+
+
+## Qwen3-4B-AWQ — vLLM 0.29.0
+
+Environment:
+
+```text
+vLLM: 0.29.0
+PyTorch: 2.13.0+cu130
+Torch CUDA runtime: 13.0
+GPU: NVIDIA CMP 40HX
+Compute capability: 7.5
+Attention backend: TRITON_ATTN
+Quantization kernel: AutoAWQ Marlin
+Server port: 8012
+Max model length: 4096
+Power limit: 150 W
+```
+
+FlashAttention 2 is unavailable on this Turing / CC 7.5 GPU, so vLLM falls back to Triton attention. AWQ is handled by the Marlin linear kernel.
+
+The larger Qwen3-8B-AWQ checkpoint (5.68 GiB weights) could load its weights but did not leave enough memory for a usable KV cache on the 8 GB card. Qwen3-4B-AWQ fits and runs normally.
+
+### Eager-mode baseline
+
+Server was launched with `--enforce-eager`, disabling torch.compile and CUDA Graphs.
+
+Warm 512-token run:
+
+```text
+Output tokens: 512
+TPOT: ~43.13 ms/token
+Generation: ~23.19 tok/s
+End-to-end: ~23.11 tok/s
+```
+
+### Optimized mode — torch.compile + CUDA Graphs
+
+Restarting the same model without `--enforce-eager` produced a major decode-speed improvement.
+
+Warm 512-token run:
+
+```text
+Output tokens: 512
+Wall time: 5.555 s
+Mean TPOT: ~10.80 ms/token
+Generation: ~92.6 tok/s
+End-to-end: ~92.2 tok/s
+```
+
+This is roughly a 4x decode-speed increase over the eager-mode result.
+
+### Long 1024-token runs
+
+Two consecutive 1024-token runs were used to check steady-state stability.
+
+| Run | Prompt tokens | Output tokens | Wall time | TPOT | Generation |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 61 | 1024 | 11.984 s | 11.638 ms/token | 85.92 tok/s |
+| 2 | 61 | 1024 | 11.913 s | 11.599 ms/token | 86.21 tok/s |
+
+The two long runs differ by only about 0.3%, so a reasonable steady-state decode baseline is **~86.1 tok/s** for this workload.
+
+### GPU telemetry during optimized inference
+
+Observed during the optimized vLLM run:
+
+```text
+GPU load: 100%
+Power: 148.42 W
+Power limit: 150 W
+VRAM: 6.54 / 8.00 GiB
+Temperature: 48 C
+Fan: 36%
+```
+
+Using the ~86.1 tok/s long-run result and ~148.4 W observed power gives approximately **0.58 tok/s/W**.
+
+All vLLM results above were captured before any capacitor / board-level modification.
