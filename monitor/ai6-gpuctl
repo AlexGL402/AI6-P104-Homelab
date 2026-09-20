@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [[ $# -ne 3 || "$1" != "power-limit" ]]; then
+  echo "usage: ai6-gpuctl power-limit <gpu-index> <watts>" >&2
+  exit 2
+fi
+
+gpu="$2"
+watts="$3"
+
+[[ "$gpu" =~ ^[0-9]+$ ]] || { echo "invalid gpu index" >&2; exit 2; }
+[[ "$watts" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "invalid watts" >&2; exit 2; }
+
+read -r min max < <(
+  nvidia-smi -i "$gpu"     --query-gpu=power.min_limit,power.max_limit     --format=csv,noheader,nounits |
+  awk -F',' '{gsub(/ /,"",$1);gsub(/ /,"",$2);print $1, $2}'
+)
+
+python3 - "$watts" "$min" "$max" <<'PY'
+import sys
+w, mn, mx = map(float, sys.argv[1:])
+if not (mn <= w <= mx):
+    raise SystemExit(f"requested power limit {w} W is outside allowed range {mn}..{mx} W")
+PY
+
+exec nvidia-smi -i "$gpu" -pl "$watts"
