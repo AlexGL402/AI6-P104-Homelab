@@ -911,18 +911,29 @@ async function refreshVllm(){
   try{
    const hr=await fetch('/api/stats');const h=await hr.json();
    if(hr.ok){
-    vllmCpu.textContent=h.cpu.usage_pct.toFixed(1)+'%';
+    const cpuPct=h.cpu.usage_pct;
+    vllmCpu.textContent=cpuPct.toFixed(1)+'%';
+    vllmCpu.className=cpuPct>=90?'bad':cpuPct>=70?'warn':'ok';
     vllmCpuSub.textContent='load '+h.cpu.load_1m.toFixed(2)+' • '+(h.cpu.temperature_c==null?'?':h.cpu.temperature_c.toFixed(0)+'°C');
-    vllmRam.textContent=h.memory.usage_pct.toFixed(1)+'%';
+    const ramPct=h.memory.usage_pct;
+    vllmRam.textContent=ramPct.toFixed(1)+'%';
+    vllmRam.className=ramPct>=90?'bad':ramPct>=75?'warn':'ok';
     vllmRamSub.textContent=(h.memory.used_bytes/1073741824).toFixed(2)+' / '+(h.memory.total_bytes/1073741824).toFixed(2)+' GiB';
     const g=(h.gpu.devices||[])[0];
     if(g){
-     vllmGpuLoad.textContent=(g.utilization_pct??'?')+'%';
+     const gu=g.utilization_pct;
+     vllmGpuLoad.textContent=(gu??'?')+'%';
+     vllmGpuLoad.className=gu==null?'':gu>=90?'ok':gu>=50?'warn':'';
      vllmGpuName.textContent=g.name||'GPU #0';
-     vllmGpuPower.textContent=(g.power_w??'?')+' W';
-     vllmGpuPowerSub.textContent='limit '+(g.power_limit_w??'?')+' W';
-     vllmGpuVram.textContent=((g.memory_used_mib||0)/1024).toFixed(2)+' GiB';
-     vllmGpuVramSub.textContent='of '+((g.memory_total_mib||0)/1024).toFixed(2)+' GiB';
+     const gp=g.power_w,gl=g.power_limit_w;
+     vllmGpuPower.textContent=(gp??'?')+' W';
+     const pRatio=(gp!=null&&gl)?gp/gl:0;
+     vllmGpuPower.className=pRatio>=1.0?'bad':pRatio>=0.90?'warn':'ok';
+     vllmGpuPowerSub.textContent='limit '+(gl??'?')+' W';
+     const vmUsed=g.memory_used_mib||0,vmTotal=g.memory_total_mib||0,vmRatio=vmTotal?vmUsed/vmTotal:0;
+     vllmGpuVram.textContent=(vmUsed/1024).toFixed(2)+' GiB';
+     vllmGpuVram.className=vmRatio>=0.95?'bad':vmRatio>=0.85?'warn':'ok';
+     vllmGpuVramSub.textContent='of '+(vmTotal/1024).toFixed(2)+' GiB';
      const gt=g.temperature_c;
      vllmGpuTemp.textContent=(gt??'?')+'°C';
      vllmGpuTemp.className=gt==null?'':cls(gt);
