@@ -1119,11 +1119,11 @@ details{{margin-top:10px;background:var(--panel);border:1px solid var(--line);bo
 <div class="details-head"><h2>Run details</h2><div class="detail-width-controls"><span>Card width</span><button type="button" onclick="setDetailWidth('compact')">Compact</button><button type="button" class="active" onclick="setDetailWidth('normal')">Normal</button><button type="button" onclick="setDetailWidth('wide')">Wide</button></div></div>
 {''.join(detail_sections)}
 <script>
-function setDetailWidth(mode){
-  const widths={compact:'150px',normal:'190px',wide:'270px'};
+function setDetailWidth(mode){{
+  const widths={{compact:'150px',normal:'190px',wide:'270px'}};
   document.documentElement.style.setProperty('--detail-min',widths[mode]||widths.normal);
   document.querySelectorAll('.detail-width-controls button').forEach(b=>b.classList.toggle('active',b.textContent.toLowerCase()===mode));
-}
+}}
 </script>
 </div></body></html>"""
 
