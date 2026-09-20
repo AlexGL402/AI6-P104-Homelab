@@ -28,6 +28,7 @@ _MINER_CFG = Path(os.environ.get("AI6_MINER_CONFIG", str(_STATE_DIR / "miner-con
 _MINER_LOG = Path(os.environ.get("AI6_MINER_LOG", str(_STATE_DIR / "forge-miner.log")))
 _MINER_PID = Path(os.environ.get("AI6_MINER_PID", str(_STATE_DIR / "forge-miner.pid")))
 _MARKET_CACHE = {"ts": 0.0, "data": {}}
+_KRYPTEX_CACHE = {"ts": 0.0, "wallet": "", "data": {}}
 
 _DEFAULT_CFG = {
     "name": "Pearl / PearlHash",
@@ -667,6 +668,110 @@ def _profitability(parsed, gpus, cfg):
     }
 
 
+
+def _kryptex_wallet_stats(wallet):
+    wallet = str(wallet or "").strip()
+    if not wallet:
+        return {}
+
+    now = time.time()
+    if (
+        _KRYPTEX_CACHE.get("wallet") == wallet
+        and now - float(_KRYPTEX_CACHE.get("ts") or 0) < 60
+        and _KRYPTEX_CACHE.get("data")
+    ):
+        return _KRYPTEX_CACHE["data"]
+
+    base_url = f"https://pool.kryptex.com/prl/miner/stats/{wallet}"
+    out = {
+        "url": base_url,
+        "payouts_url": f"https://pool.kryptex.com/prl/miner/payouts/{wallet}",
+        "settings_url": f"https://pool.kryptex.com/prl/miner/settings/{wallet}",
+        "workers_online": None,
+        "workers_offline": None,
+        "hashrate_30m_ths": None,
+        "hashrate_3h_ths": None,
+        "hashrate_24h_ths": None,
+        "confirmed_prl": None,
+        "confirmed_usd": None,
+        "pending_prl": None,
+        "pending_usd": None,
+        "reward_7d_prl": None,
+        "reward_30d_prl": None,
+        "total_paid_prl": None,
+        "worker_name": None,
+        "worker_mode": None,
+        "worker_valid": None,
+        "worker_stale": None,
+        "worker_invalid": None,
+        "worker_miner": None,
+        "updated_at": int(now),
+    }
+
+    try:
+        raw, _ = _http_get(base_url, timeout=8.0)
+        text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        text = re.sub(r"\s+", " ", text)
+
+        def grab(pattern, conv=float):
+            m = re.search(pattern, text, re.I)
+            if not m:
+                return None
+            try:
+                return conv(m.group(1).replace(",", ""))
+            except Exception:
+                return None
+
+        # Summary block.
+        out["workers_online"] = grab(r"Workers\s+(\d+)\s+Online", int)
+        out["workers_offline"] = grab(r"Online\s+\d+\s+Offline\s+(\d+)", int)
+        out["hashrate_30m_ths"] = grab(r"Hashrate\s+([0-9]+(?:\.[0-9]+)?)\s*TH/s\s+30\s*min")
+        out["hashrate_3h_ths"] = grab(r"30\s*min\s+([0-9]+(?:\.[0-9]+)?)\s*TH/s\s+3\s*h")
+        out["hashrate_24h_ths"] = grab(r"3\s*h\s+([0-9]+(?:\.[0-9]+)?)\s*TH/s\s+24\s*h")
+
+        # Balance and rewards.
+        out["confirmed_prl"] = grab(r"Confirmed\s+([0-9]+(?:\.[0-9]+)?)\s*PRL")
+        out["confirmed_usd"] = grab(r"Confirmed.*?PRL\s*[≈~]?\s*\$?([0-9]+(?:\.[0-9]+)?)\s*USD")
+        out["pending_prl"] = grab(r"Pending\s+([0-9]+(?:\.[0-9]+)?)\s*PRL")
+        out["pending_usd"] = grab(r"Pending.*?PRL\s*[≈~]?\s*\$?([0-9]+(?:\.[0-9]+)?)\s*USD")
+        out["reward_7d_prl"] = grab(r"Reward\s*\(\s*7\s*days\s*\)\s+([0-9]+(?:\.[0-9]+)?)\s*PRL")
+        out["reward_30d_prl"] = grab(r"Reward\s*\(\s*30\s*days\s*\)\s+([0-9]+(?:\.[0-9]+)?)\s*PRL")
+        out["total_paid_prl"] = grab(r"Total\s+Paid\s+([0-9]+(?:\.[0-9]+)?)\s*PRL")
+
+        # Worker row. Use configured worker name if visible, otherwise take the
+        # first PPS+/SOLO row that follows the workers table.
+        worker = str((_load_cfg().get("worker") or "")).strip()
+        row = None
+        if worker:
+            row = re.search(
+                re.escape(worker)
+                + r"\s+(PPS\+|SOLO)\s+([0-9]+(?:\.[0-9]+)?)\s*TH/s\s+"
+                  r"([0-9]+(?:\.[0-9]+)?)\s*TH/s\s+(\d+)\s+(\d+)\s+(\d+)",
+                text,
+                re.I,
+            )
+        if row:
+            out["worker_name"] = worker
+            out["worker_mode"] = row.group(1).upper()
+            out["worker_valid"] = int(row.group(4))
+            out["worker_stale"] = int(row.group(5))
+            out["worker_invalid"] = int(row.group(6))
+
+            # Miner software often appears just after the worker row.
+            pos = row.end()
+            m = re.search(r"(ForgeMiner/[0-9.]+|lolMiner/[0-9.]+|Rigel/[0-9.]+|SRBMiner[^ ]*)", text[pos:pos+500], re.I)
+            if m:
+                out["worker_miner"] = m.group(1)
+
+    except Exception as e:
+        out["error"] = str(e)
+
+    _KRYPTEX_CACHE["ts"] = now
+    _KRYPTEX_CACHE["wallet"] = wallet
+    _KRYPTEX_CACHE["data"] = out
+    return out
+
+
 def _status():
     cfg = _load_cfg()
     proc = _miner_proc()
@@ -684,6 +789,7 @@ def _status():
     binary = _detect_binary(cfg)
     gpus = _gpu_snapshot()
     profitability = _profitability(parsed, gpus, cfg)
+    kryptex = _kryptex_wallet_stats(cfg.get("wallet"))
     return {
         "running": running,
         "pid": pid,
@@ -694,6 +800,7 @@ def _status():
         "metrics": parsed,
         "gpus": gpus,
         "profitability": profitability,
+        "kryptex": kryptex,
         "log_path": str(_MINER_LOG),
     }
 
@@ -890,6 +997,26 @@ def install():
 
     <div class="miner-profit-note" id="minerProfitNote">Profitability uses live PRL price/network data and current GPU power. Mining income is an estimate and varies with network difficulty, pool luck and price.</div>
 
+    <div class="miner-kryptex-panel">
+      <div class="miner-kryptex-head">
+        <div><b>Kryptex Pool stats</b><small id="kryptexUpdated">public miner page • refresh ~60s</small></div>
+        <div class="miner-kryptex-links">
+          <a id="kryptexStatsLink" href="#" target="_blank" rel="noopener">Workers ↗</a>
+          <a id="kryptexPayoutsLink" href="#" target="_blank" rel="noopener">Payouts ↗</a>
+          <a id="kryptexSettingsLink" href="#" target="_blank" rel="noopener">Settings ↗</a>
+        </div>
+      </div>
+      <div class="miner-kryptex-grid">
+        <div><span>Workers</span><b id="kxWorkers">—</b><small>online / offline</small></div>
+        <div><span>Pool hashrate</span><b id="kxHash30m">—</b><small id="kxHashLong">3h — • 24h —</small></div>
+        <div><span>Balance</span><b id="kxBalance">—</b><small id="kxPending">pending —</small></div>
+        <div><span>Payouts</span><b id="kxPaid">—</b><small id="kxRewards">7d — • 30d —</small></div>
+        <div><span>Worker shares</span><b id="kxShares">—</b><small>valid / stale / invalid</small></div>
+        <div><span>Worker</span><b id="kxWorker">—</b><small id="kxMiner">—</small></div>
+      </div>
+      <div id="kxError" class="miner-profit-note"></div>
+    </div>
+
     <div class="miner-log-wrap">
       <div class="miner-log-head"><span id="minerLogPath">ForgeMiner log</span><button type="button" onclick="refreshMinerLogs()">Refresh log</button></div>
       <pre id="minerLogText">No miner log loaded yet.</pre>
@@ -911,8 +1038,9 @@ def install():
 .miner-config label,.miner-power-row label{font-size:10px;color:#aaa}.miner-config input,.miner-power-row input,.miner-power-row select{display:block;width:100%;margin-top:4px;padding:7px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}
 .miner-actions,.miner-power-row{display:flex;gap:7px;align-items:end;flex-wrap:wrap;margin-top:10px}.miner-power-row label{min-width:120px}.miner-power-row button{height:32px}
 .miner-start{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.miner-stop{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}
+.miner-kryptex-panel{margin-top:10px;background:#121416;border:1px solid #30343a;border-radius:9px;padding:10px}.miner-kryptex-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.miner-kryptex-head b{display:block}.miner-kryptex-head small{display:block;color:#8f969c;font-size:10px;margin-top:2px}.miner-kryptex-links{display:flex;gap:6px;flex-wrap:wrap}.miner-kryptex-links a{color:#79bfff;text-decoration:none;border:1px solid #315d7b;background:#14212a;border-radius:6px;padding:5px 8px;font-size:10px}.miner-kryptex-grid{display:grid;grid-template-columns:repeat(6,minmax(140px,1fr));gap:7px;margin-top:9px}.miner-kryptex-grid>div{background:#101214;border:1px solid #292d31;border-radius:7px;padding:8px}.miner-kryptex-grid span,.miner-kryptex-grid small{display:block;color:#8f969c;font-size:10px}.miner-kryptex-grid b{display:block;color:#eee;font-size:16px;margin:3px 0}
 .miner-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.miner-log-head{display:flex;justify-content:space-between;align-items:center;color:#888;font-size:10px}.miner-log-head button{padding:4px 8px;font-size:10px}.miner-log-wrap pre{margin:7px 0 0;max-height:330px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
-@media(max-width:1100px){.miner-config{grid-template-columns:repeat(2,minmax(150px,1fr))}.miner-summary{grid-template-columns:repeat(2,minmax(150px,1fr))}}
+@media(max-width:1100px){.miner-config{grid-template-columns:repeat(2,minmax(150px,1fr))}.miner-summary{grid-template-columns:repeat(2,minmax(150px,1fr))}.miner-kryptex-grid{grid-template-columns:repeat(2,minmax(140px,1fr))}}
 '''
     dashboard = dashboard.replace("</style>", css + "\n</style>", 1)
 
@@ -963,6 +1091,7 @@ async function refreshMiner(){
   minerLogPath.textContent=s.log_path||'ForgeMiner log';
   renderMinerGpuGrid(s.gpus||[],String((s.config||{}).gpu||'0'));
   renderMinerProfitability(s.profitability||{});
+  renderKryptexStats(s.kryptex||{});
  }catch(e){minerMsg.textContent='Status error: '+e.message;}
 }
 
@@ -1000,6 +1129,29 @@ function renderMinerProfitability(p){
  profitNetMonth.textContent=minerMoney(p.net_kzt_month);
  const src=[m.price_source,m.fx_source,m.source].filter(Boolean).join(' • ');
  minerProfitNote.textContent='Estimate from current miner avg1m, live PRL price/network data, pool fee '+minerNum(p.pool_fee_pct,1)+'%, and GPU-only electricity. '+(src?'Sources: '+src+'. ':'')+'Actual payout varies with pool luck, difficulty and price.';
+}
+
+function renderKryptexStats(k){
+ kryptexStatsLink.href=k.url||'#';
+ kryptexPayoutsLink.href=k.payouts_url||'#';
+ kryptexSettingsLink.href=k.settings_url||'#';
+ kxWorkers.textContent=(k.workers_online==null?'—':k.workers_online)+' / '+(k.workers_offline==null?'—':k.workers_offline);
+ kxHash30m.textContent=k.hashrate_30m_ths==null?'—':Number(k.hashrate_30m_ths).toFixed(2)+' TH/s';
+ kxHashLong.textContent='3h '+(k.hashrate_3h_ths==null?'—':Number(k.hashrate_3h_ths).toFixed(2)+' TH/s')+' • 24h '+(k.hashrate_24h_ths==null?'—':Number(k.hashrate_24h_ths).toFixed(2)+' TH/s');
+ kxBalance.textContent=k.confirmed_prl==null?'—':Number(k.confirmed_prl).toFixed(6)+' PRL';
+ kxPending.textContent='pending '+(k.pending_prl==null?'—':Number(k.pending_prl).toFixed(6)+' PRL');
+ kxPaid.textContent=k.total_paid_prl==null?'—':Number(k.total_paid_prl).toFixed(6)+' PRL';
+ kxRewards.textContent='7d '+(k.reward_7d_prl==null?'—':Number(k.reward_7d_prl).toFixed(6))+' • 30d '+(k.reward_30d_prl==null?'—':Number(k.reward_30d_prl).toFixed(6));
+ kxShares.textContent=(k.worker_valid==null?'—':k.worker_valid)+' / '+(k.worker_stale==null?'—':k.worker_stale)+' / '+(k.worker_invalid==null?'—':k.worker_invalid);
+ kxWorker.textContent=(k.worker_name||'—')+(k.worker_mode?' • '+k.worker_mode:'');
+ kxMiner.textContent=k.worker_miner||'miner —';
+ kxError.textContent=k.error?'Kryptex fetch error: '+k.error:'';
+ if(k.updated_at){
+   const d=new Date(Number(k.updated_at)*1000);
+   kryptexUpdated.textContent='public miner page • '+d.toLocaleTimeString()+' • refresh ~60s';
+ }else{
+   kryptexUpdated.textContent='public miner page • refresh ~60s';
+ }
 }
 
 function renderMinerGpuGrid(gpus,gpuString){
