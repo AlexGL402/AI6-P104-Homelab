@@ -158,41 +158,80 @@ def _parse_miner_log(text):
 
     rate = None
     rate_unit = None
+    pool_rate = None
+    pool_rate_unit = None
     accepted = 0
-    rejected = 0
     stale = 0
+    rejected = 0
     pool_latency_ms = None
+    avg_1m = None
+    avg_1h = None
+    avg_24h = None
 
-    # Prefer the most recent total/hashrate line.
+    # Forge TUI table rows look like:
+    # | 0  CMP 40HX 8G  40.47 TH/s  78.16 TH/s  3 / 0 / 0 |
+    # The first rate is the GPU hashrate; the second is the pool-side rate.
+    # Read the newest GPU0 row so the dashboard reflects the miner's latest TUI.
+    gpu_row_re = re.compile(
+        r"\|\s*0\s+.+?\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
+        r"\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
+        r"\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*\|",
+        re.I,
+    )
     for line in reversed(lines):
-        if rate is None and re.search(r"(?:total|hashrate|TH/s|GH/s|MH/s|kH/s)", line, re.I):
-            matches = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)", line, re.I)
-            if matches:
-                val, unit = matches[-1]
-                rate = float(val)
-                rate_unit = unit
-        if pool_latency_ms is None:
-            m = re.search(r"accepted.*?\[\s*(\d+)\s*ms\s*\]", line, re.I)
-            if m:
-                pool_latency_ms = int(m.group(1))
-        if rate is not None and pool_latency_ms is not None:
+        m = gpu_row_re.search(line)
+        if m:
+            rate = float(m.group(1))
+            rate_unit = m.group(2)
+            pool_rate = float(m.group(3))
+            pool_rate_unit = m.group(4)
+            accepted = int(m.group(5))
+            stale = int(m.group(6))
+            rejected = int(m.group(7))
             break
 
-    for line in lines:
-        low = line.lower()
-        if "share accepted" in low or re.search(r"\baccepted\b", low):
-            accepted += 1
-        if "rejected" in low:
-            rejected += 1
-        if "stale" in low:
-            stale += 1
+    # Session Stats gives stable averages and latency; use the newest values.
+    for line in reversed(lines):
+        if pool_latency_ms is None:
+            m = re.search(r"\|\s*Latency\s+~?\s*(\d+)\s*ms", line, re.I)
+            if m:
+                pool_latency_ms = int(m.group(1))
+        if avg_1m is None:
+            m = re.search(r"\|\s*Avg\s+1\s+min\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)", line, re.I)
+            if m:
+                avg_1m = float(m.group(1))
+        if avg_1h is None:
+            m = re.search(r"\|\s*Avg\s+1\s+hr\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)", line, re.I)
+            if m:
+                avg_1h = float(m.group(1))
+        if avg_24h is None:
+            m = re.search(r"\|\s*Avg\s+24\s+hr\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)", line, re.I)
+            if m:
+                avg_24h = float(m.group(1))
+        if all(v is not None for v in (pool_latency_ms, avg_1m, avg_1h, avg_24h)):
+            break
+
+    # Fallback for very early startup before the first TUI table is printed.
+    if rate is None:
+        for line in reversed(lines):
+            matches = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)", line, re.I)
+            if matches:
+                val, unit = matches[0]
+                rate = float(val)
+                rate_unit = unit
+                break
 
     return {
         "hashrate": rate,
         "hashrate_unit": rate_unit,
+        "pool_hashrate": pool_rate,
+        "pool_hashrate_unit": pool_rate_unit,
+        "avg_1m": avg_1m,
+        "avg_1h": avg_1h,
+        "avg_24h": avg_24h,
         "accepted": accepted,
-        "rejected": rejected,
         "stale": stale,
+        "rejected": rejected,
         "latency_ms": pool_latency_ms,
     }
 
@@ -497,9 +536,9 @@ async function refreshMiner(){
   minerState.className='status '+(s.running?'ready':'down');
   const m=s.metrics||{};
   minerHashrate.textContent=m.hashrate==null?'—':Number(m.hashrate).toFixed(2)+' '+(m.hashrate_unit||'');
-  minerAlgo.textContent=(s.config&&s.config.algorithm)||'pearlhash';
-  minerShares.textContent=(m.accepted||0)+' / '+(m.rejected||0)+(m.stale?' / '+m.stale+' stale':'');
-  minerLatency.textContent=m.latency_ms==null?'accepted / rejected':'last accepted '+m.latency_ms+' ms';
+  minerAlgo.textContent=(m.avg_1m==null?'':'avg 1m '+Number(m.avg_1m).toFixed(2)+' TH/s • ')+((s.config&&s.config.algorithm)||'pearlhash');
+  minerShares.textContent=(m.accepted||0)+' / '+(m.stale||0)+' / '+(m.rejected||0);
+  minerLatency.textContent=(m.latency_ms==null?'A / S / R':'A / S / R • '+m.latency_ms+' ms')+(m.pool_hashrate==null?'':' • pool '+Number(m.pool_hashrate).toFixed(2)+' '+(m.pool_hashrate_unit||''));
   minerUptime.textContent=minerFmtUptime(s.uptime_s);
   minerPid.textContent='PID '+(s.pid??'—');
   minerAiState.textContent=s.vllm_busy?'AI BUSY':'IDLE';
