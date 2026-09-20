@@ -444,7 +444,10 @@ def install():
   </div>
 </div>
 '''
-    dashboard = dashboard.replace("</div>\n<div id=\"vllmTab\"", "</div>\n" + miner_html + "\n<div id=\"vllmTab\"", 1)
+    if "</body>" not in dashboard:
+        raise RuntimeError("Miner tab injection failed: </body> marker not found")
+    if 'id="minerTab"' not in dashboard:
+        dashboard = dashboard.replace("</body>", miner_html + "\n</body>", 1)
 
     css = r'''
 .miner-summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:8px;margin:10px 0}
@@ -459,32 +462,7 @@ def install():
 '''
     dashboard = dashboard.replace("</style>", css + "\n</style>", 1)
 
-    # Extend the existing tab switcher.
-    dashboard = dashboard.replace(
-        "const mon=document.getElementById('monitorTab'),vl=document.getElementById('vllmTab'),bh=document.getElementById('benchsTab');",
-        "const mon=document.getElementById('monitorTab'),vl=document.getElementById('vllmTab'),bh=document.getElementById('benchsTab'),mn=document.getElementById('minerTab');",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "const mb=document.getElementById('tabMonitorBtn'),vb=document.getElementById('tabVllmBtn'),bb=document.getElementById('tabBenchsBtn');",
-        "const mb=document.getElementById('tabMonitorBtn'),vb=document.getElementById('tabVllmBtn'),bb=document.getElementById('tabBenchsBtn'),nb=document.getElementById('tabMinerBtn');",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "bh.style.display=which==='benchs'?'block':'none';",
-        "bh.style.display=which==='benchs'?'block':'none';\n mn.style.display=which==='miner'?'block':'none';",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "bb.classList.toggle('active',which==='benchs');",
-        "bb.classList.toggle('active',which==='benchs');\n nb.classList.toggle('active',which==='miner');",
-        1,
-    )
-    dashboard = dashboard.replace(
-        "if(which==='benchs'){loadBenchHistory();}",
-        "if(which==='benchs'){loadBenchHistory();}\n if(which==='miner'){refreshMiner();refreshMinerLogs();}",
-        1,
-    )
+    # Tab switching is finalized centrally in ai6_monitor_auto.py.
 
     js = r'''
 let minerConfigLoaded=false;
