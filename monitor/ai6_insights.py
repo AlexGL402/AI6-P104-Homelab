@@ -379,34 +379,62 @@ function setPrlPeriod(p,btn){
 }
 function insPct(v){
  if(v==null||!Number.isFinite(Number(v)))return 'collecting history';
- const n=Number(v);return (n>=0?'+':'')+n.toFixed(1)+'% vs '+prlPeriod;
+ const n=Number(v);
+ return (n>=0?'+':'')+n.toFixed(1)+'% vs '+prlPeriod;
 }
 function insCompact(n){
- n=Number(n);if(!Number.isFinite(n))return '—';
+ n=Number(n);
+ if(!Number.isFinite(n))return '—';
  if(Math.abs(n)>=1e9)return (n/1e9).toFixed(2)+'B';
  if(Math.abs(n)>=1e6)return (n/1e6).toFixed(2)+'M';
  if(Math.abs(n)>=1e3)return (n/1e3).toFixed(1)+'k';
  return n.toFixed(0);
 }
 function renderPrlChart(history){
- const svg=document.getElementById('prlChart');if(!svg)return;
+ const svg=document.getElementById('prlChart');
+ if(!svg)return;
  const sec=prlPeriod==='24h'?86400:prlPeriod==='7d'?7*86400:30*86400;
  const now=Math.floor(Date.now()/1000);
- let pts=(history||[]).filter(x=>x.ts>=now-sec&&x.price_usdt!=null);
+ const pts=(history||[]).filter(x=>x.ts>=now-sec&&x.price_usdt!=null);
  if(pts.length<2){
-   svg.innerHTML='<text x="500" y="95" text-anchor="middle" class="prl-empty">Collecting local history…</text>';
-   prlChartRange.textContent=pts.length+' point'+(pts.length===1?'':'s');
-   return;
+  svg.innerHTML='<text x="500" y="95" text-anchor="middle" class="prl-empty">Collecting local history…</text>';
+  prlChartRange.textContent=pts.length+' point'+(pts.length===1?'':'s');
+  return;
  }
  const vals=pts.map(x=>Number(x.price_usdt)).filter(Number.isFinite);
  const min=Math.min(...vals),max=Math.max(...vals),span=(max-min)||1;
  const t0=pts[0].ts,t1=pts[pts.length-1].ts,dt=(t1-t0)||1;
  const xy=pts.map(x=>[(x.ts-t0)/dt*980+10,170-(Number(x.price_usdt)-min)/span*150]).filter(p=>Number.isFinite(p[1]));
- let d=xy.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+ const d=xy.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
  svg.innerHTML='<line x1="10" y1="20" x2="990" y2="20" class="prl-gridline"/><line x1="10" y1="95" x2="990" y2="95" class="prl-gridline"/><line x1="10" y1="170" x2="990" y2="170" class="prl-gridline"/><path d="'+d+'" class="prl-line"/>';
- prlChartRange.textContent='
+ prlChartRange.textContent='$'+min.toFixed(3)+' — $'+max.toFixed(3)+' • '+pts.length+' samples';
+}
+function renderPrlMarket(m){
+ prlMarketData=m||{};
+ const x=prlMarketData.current||{};
+ const ch=(prlMarketData.changes||{})[prlPeriod]||{};
+ prlPrice.textContent=x.price_usdt==null?'—':'$'+Number(x.price_usdt).toFixed(4);
+ prlPriceChange.textContent=insPct(ch.price_pct);
+ prlNetwork.textContent=x.network_hashrate_hs==null?'—':(Number(x.network_hashrate_hs)/1e18).toFixed(2)+' EH/s';
+ prlNetworkChange.textContent=insPct(ch.network_pct);
+ prlDifficulty.textContent=x.difficulty==null?'—':insCompact(x.difficulty);
+ prlBlock.textContent=(x.block_time_s?'block ~'+Math.round(x.block_time_s)+'s':'')+(x.block_reward_prl?' • reward '+Number(x.block_reward_prl).toFixed(0)+' PRL':'');
+ prlNetDay.textContent=x.net_kzt_day==null?'—':Math.round(Number(x.net_kzt_day)).toLocaleString('ru-RU')+' ₸';
+ prlNetChange.textContent=insPct(ch.net_pct);
+ prlChartTitle.textContent='PRL price • '+prlPeriod;
+ if(prlMarketData.history_since){
+  const dt=new Date(Number(prlMarketData.history_since)*1000);
+  prlMarketSince.textContent='Local history: '+(prlMarketData.history_count||0)+' snapshots since '+dt.toLocaleString();
+ }else{
+  prlMarketSince.textContent='Local history starts now; 24h/7d/30d changes fill automatically.';
+ }
+ renderPrlChart(prlMarketData.history||[]);
+}
+
+async function refreshInsights(){
  try{
-  const r=await fetch('/api/insights',{cache:'no-store'});const d=await r.json();
+  const r=await fetch('/api/insights',{cache:'no-store'});
+  const d=await r.json();
   if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
   insightsCount.textContent=d.count+' saved runs';
   renderPrlMarket(d.market||{});
@@ -418,7 +446,10 @@ function renderPrlChart(history){
    insSweetConfidence.textContent=s.confidence+' confidence • '+s.samples+' comparable runs';
    insSweetConfidence.className='ins-confidence '+String(s.confidence).toLowerCase();
   }else{
-   insSweetValue.textContent='—';insSweetSub.textContent='Need comparable PL runs';insSweetConfidence.textContent='Low confidence';insSweetConfidence.className='ins-confidence low';
+   insSweetValue.textContent='—';
+   insSweetSub.textContent='Need comparable PL runs';
+   insSweetConfidence.textContent='Low confidence';
+   insSweetConfidence.className='ins-confidence low';
   }
 
   const i=d.interactive;
@@ -434,7 +465,6 @@ function renderPrlChart(history){
   insLongSub.textContent=l?insRunLabel(l)+' • '+Number(l.aggregate_tok_s).toFixed(2)+' tok/s':'No 1024+ output run';
 
   insBaseline.innerHTML=(d.baseline.control_points||[]).map((x,n)=>insRow((n+1)+'. '+x,n<4?'vLLM control':'mining control')).join('');
-
   insGpuCompare.innerHTML=(d.gpus||[]).map(g=>insRow(g,'saved benchmark data')).join('')||'<div class="muted">No GPU data</div>';
 
   const sweetW=s&&s.run?Math.round(s.run.gpu_power_limit_w):'—';
@@ -442,187 +472,9 @@ function renderPrlChart(history){
     ['Interactive coding',i?'Use '+insRunLabel(i):'Need more data'],
     ['Batch / API',b?'Best measured: '+Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'Need more data'],
     ['Power efficiency',s?'Current sweet spot: '+sweetW+' W':'Need PL sweep'],
-    ['AI idle', 'Use Miner tab; keep vLLM/miner mutually exclusive on the same GPU']
+    ['AI idle','Use Miner tab; keep vLLM/miner mutually exclusive on the same GPU']
   ];
   insRecommendations.innerHTML=recs.map(x=>'<div class="ins-rec"><b>'+escHtml(x[0])+'</b><span>'+escHtml(x[1])+'</span></div>').join('');
-
-  insAnomalies.innerHTML=(d.anomalies||[]).map(a=>insRow(a.run_id||'run',a.text||'')).join('')||'<div class="muted">No obvious TTFT outliers in saved runs.</div>';
- }catch(e){
-  insightsCount.textContent='Insights error: '+e.message;
- }
-}
-'''
-    dashboard = dashboard.replace("refresh();setInterval(refresh,2000);", js + "\nrefresh();setInterval(refresh,2000);", 1)
-
-    base.DASHBOARD = dashboard
-    dynamic.base.DASHBOARD = dashboard
-    dynamic.app = base.app
-+min.toFixed(3)+' — 
- try{
-  const r=await fetch('/api/insights',{cache:'no-store'});const d=await r.json();
-  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  insightsCount.textContent=d.count+' saved runs';
-
-  const s=d.sweet_spot;
-  if(s&&s.run){
-   insSweetValue.textContent=Math.round(s.run.gpu_power_limit_w)+' W';
-   insSweetSub.textContent=insRunLabel(s.run)+' • '+Number(s.run.aggregate_tok_s).toFixed(2)+' tok/s • '+Number(s.efficiency).toFixed(3)+' tok/s/W • '+Number(s.throughput_penalty_pct).toFixed(2)+'% from best';
-   insSweetConfidence.textContent=s.confidence+' confidence • '+s.samples+' comparable runs';
-   insSweetConfidence.className='ins-confidence '+String(s.confidence).toLowerCase();
-  }else{
-   insSweetValue.textContent='—';insSweetSub.textContent='Need comparable PL runs';insSweetConfidence.textContent='Low confidence';insSweetConfidence.className='ins-confidence low';
-  }
-
-  const i=d.interactive;
-  insInteractiveValue.textContent=i?Number(i.per_request_min_tok_s).toFixed(2)+' tok/s':'—';
-  insInteractiveSub.textContent=i?insRunLabel(i)+' • TTFT '+Number(i.ttft_avg_s).toFixed(3)+' s':'No qualifying run';
-
-  const b=d.batch;
-  insBatchValue.textContent=b?Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'—';
-  insBatchSub.textContent=b?insRunLabel(b):'No benchmark runs';
-
-  const l=d.long_decode;
-  insLongValue.textContent=l?Number(l.aggregate_tok_s/l.gpu_power_avg_w).toFixed(3)+' tok/s/W':'—';
-  insLongSub.textContent=l?insRunLabel(l)+' • '+Number(l.aggregate_tok_s).toFixed(2)+' tok/s':'No 1024+ output run';
-
-  insBaseline.innerHTML=(d.baseline.control_points||[]).map((x,n)=>insRow((n+1)+'. '+x,n<4?'vLLM control':'mining control')).join('');
-
-  insGpuCompare.innerHTML=(d.gpus||[]).map(g=>insRow(g,'saved benchmark data')).join('')||'<div class="muted">No GPU data</div>';
-
-  const sweetW=s&&s.run?Math.round(s.run.gpu_power_limit_w):'—';
-  const recs=[
-    ['Interactive coding',i?'Use '+insRunLabel(i):'Need more data'],
-    ['Batch / API',b?'Best measured: '+Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'Need more data'],
-    ['Power efficiency',s?'Current sweet spot: '+sweetW+' W':'Need PL sweep'],
-    ['AI idle', 'Use Miner tab; keep vLLM/miner mutually exclusive on the same GPU']
-  ];
-  insRecommendations.innerHTML=recs.map(x=>'<div class="ins-rec"><b>'+escHtml(x[0])+'</b><span>'+escHtml(x[1])+'</span></div>').join('');
-
-  insAnomalies.innerHTML=(d.anomalies||[]).map(a=>insRow(a.run_id||'run',a.text||'')).join('')||'<div class="muted">No obvious TTFT outliers in saved runs.</div>';
- }catch(e){
-  insightsCount.textContent='Insights error: '+e.message;
- }
-}
-'''
-    dashboard = dashboard.replace("refresh();setInterval(refresh,2000);", js + "\nrefresh();setInterval(refresh,2000);", 1)
-
-    base.DASHBOARD = dashboard
-    dynamic.base.DASHBOARD = dashboard
-    dynamic.app = base.app
-+max.toFixed(3)+' • '+pts.length+' samples';
-}
-function renderPrlMarket(m){
- prlMarketData=m||{};
- const x=m.current||{},ch=(m.changes||{})[prlPeriod]||{};
- prlPrice.textContent=x.price_usdt==null?'—':'
- try{
-  const r=await fetch('/api/insights',{cache:'no-store'});const d=await r.json();
-  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  insightsCount.textContent=d.count+' saved runs';
-
-  const s=d.sweet_spot;
-  if(s&&s.run){
-   insSweetValue.textContent=Math.round(s.run.gpu_power_limit_w)+' W';
-   insSweetSub.textContent=insRunLabel(s.run)+' • '+Number(s.run.aggregate_tok_s).toFixed(2)+' tok/s • '+Number(s.efficiency).toFixed(3)+' tok/s/W • '+Number(s.throughput_penalty_pct).toFixed(2)+'% from best';
-   insSweetConfidence.textContent=s.confidence+' confidence • '+s.samples+' comparable runs';
-   insSweetConfidence.className='ins-confidence '+String(s.confidence).toLowerCase();
-  }else{
-   insSweetValue.textContent='—';insSweetSub.textContent='Need comparable PL runs';insSweetConfidence.textContent='Low confidence';insSweetConfidence.className='ins-confidence low';
-  }
-
-  const i=d.interactive;
-  insInteractiveValue.textContent=i?Number(i.per_request_min_tok_s).toFixed(2)+' tok/s':'—';
-  insInteractiveSub.textContent=i?insRunLabel(i)+' • TTFT '+Number(i.ttft_avg_s).toFixed(3)+' s':'No qualifying run';
-
-  const b=d.batch;
-  insBatchValue.textContent=b?Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'—';
-  insBatchSub.textContent=b?insRunLabel(b):'No benchmark runs';
-
-  const l=d.long_decode;
-  insLongValue.textContent=l?Number(l.aggregate_tok_s/l.gpu_power_avg_w).toFixed(3)+' tok/s/W':'—';
-  insLongSub.textContent=l?insRunLabel(l)+' • '+Number(l.aggregate_tok_s).toFixed(2)+' tok/s':'No 1024+ output run';
-
-  insBaseline.innerHTML=(d.baseline.control_points||[]).map((x,n)=>insRow((n+1)+'. '+x,n<4?'vLLM control':'mining control')).join('');
-
-  insGpuCompare.innerHTML=(d.gpus||[]).map(g=>insRow(g,'saved benchmark data')).join('')||'<div class="muted">No GPU data</div>';
-
-  const sweetW=s&&s.run?Math.round(s.run.gpu_power_limit_w):'—';
-  const recs=[
-    ['Interactive coding',i?'Use '+insRunLabel(i):'Need more data'],
-    ['Batch / API',b?'Best measured: '+Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'Need more data'],
-    ['Power efficiency',s?'Current sweet spot: '+sweetW+' W':'Need PL sweep'],
-    ['AI idle', 'Use Miner tab; keep vLLM/miner mutually exclusive on the same GPU']
-  ];
-  insRecommendations.innerHTML=recs.map(x=>'<div class="ins-rec"><b>'+escHtml(x[0])+'</b><span>'+escHtml(x[1])+'</span></div>').join('');
-
-  insAnomalies.innerHTML=(d.anomalies||[]).map(a=>insRow(a.run_id||'run',a.text||'')).join('')||'<div class="muted">No obvious TTFT outliers in saved runs.</div>';
- }catch(e){
-  insightsCount.textContent='Insights error: '+e.message;
- }
-}
-'''
-    dashboard = dashboard.replace("refresh();setInterval(refresh,2000);", js + "\nrefresh();setInterval(refresh,2000);", 1)
-
-    base.DASHBOARD = dashboard
-    dynamic.base.DASHBOARD = dashboard
-    dynamic.app = base.app
-+Number(x.price_usdt).toFixed(4);
- prlPriceChange.textContent=insPct(ch.price_pct);
- prlNetwork.textContent=x.network_hashrate_hs==null?'—':(Number(x.network_hashrate_hs)/1e18).toFixed(2)+' EH/s';
- prlNetworkChange.textContent=insPct(ch.network_pct);
- prlDifficulty.textContent=x.difficulty==null?'—':insCompact(x.difficulty);
- prlBlock.textContent=(x.block_time_s?'block ~'+Math.round(x.block_time_s)+'s':'')+(x.block_reward_prl?' • reward '+Number(x.block_reward_prl).toFixed(0)+' PRL':'');
- prlNetDay.textContent=x.net_kzt_day==null?'—':Math.round(Number(x.net_kzt_day)).toLocaleString('ru-RU')+' ₸';
- prlNetChange.textContent=insPct(ch.net_pct);
- prlChartTitle.textContent='PRL price • '+prlPeriod;
- if(m.history_since){
-   const d=new Date(Number(m.history_since)*1000);
-   prlMarketSince.textContent='Local history: '+(m.history_count||0)+' snapshots since '+d.toLocaleString();
- }else prlMarketSince.textContent='Local history starts now; 24h/7d/30d changes fill automatically.';
- renderPrlChart(m.history||[]);
-}
-
-async function refreshInsights(){
- try{
-  const r=await fetch('/api/insights',{cache:'no-store'});const d=await r.json();
-  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  insightsCount.textContent=d.count+' saved runs';
-
-  const s=d.sweet_spot;
-  if(s&&s.run){
-   insSweetValue.textContent=Math.round(s.run.gpu_power_limit_w)+' W';
-   insSweetSub.textContent=insRunLabel(s.run)+' • '+Number(s.run.aggregate_tok_s).toFixed(2)+' tok/s • '+Number(s.efficiency).toFixed(3)+' tok/s/W • '+Number(s.throughput_penalty_pct).toFixed(2)+'% from best';
-   insSweetConfidence.textContent=s.confidence+' confidence • '+s.samples+' comparable runs';
-   insSweetConfidence.className='ins-confidence '+String(s.confidence).toLowerCase();
-  }else{
-   insSweetValue.textContent='—';insSweetSub.textContent='Need comparable PL runs';insSweetConfidence.textContent='Low confidence';insSweetConfidence.className='ins-confidence low';
-  }
-
-  const i=d.interactive;
-  insInteractiveValue.textContent=i?Number(i.per_request_min_tok_s).toFixed(2)+' tok/s':'—';
-  insInteractiveSub.textContent=i?insRunLabel(i)+' • TTFT '+Number(i.ttft_avg_s).toFixed(3)+' s':'No qualifying run';
-
-  const b=d.batch;
-  insBatchValue.textContent=b?Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'—';
-  insBatchSub.textContent=b?insRunLabel(b):'No benchmark runs';
-
-  const l=d.long_decode;
-  insLongValue.textContent=l?Number(l.aggregate_tok_s/l.gpu_power_avg_w).toFixed(3)+' tok/s/W':'—';
-  insLongSub.textContent=l?insRunLabel(l)+' • '+Number(l.aggregate_tok_s).toFixed(2)+' tok/s':'No 1024+ output run';
-
-  insBaseline.innerHTML=(d.baseline.control_points||[]).map((x,n)=>insRow((n+1)+'. '+x,n<4?'vLLM control':'mining control')).join('');
-
-  insGpuCompare.innerHTML=(d.gpus||[]).map(g=>insRow(g,'saved benchmark data')).join('')||'<div class="muted">No GPU data</div>';
-
-  const sweetW=s&&s.run?Math.round(s.run.gpu_power_limit_w):'—';
-  const recs=[
-    ['Interactive coding',i?'Use '+insRunLabel(i):'Need more data'],
-    ['Batch / API',b?'Best measured: '+Number(b.aggregate_tok_s).toFixed(2)+' tok/s':'Need more data'],
-    ['Power efficiency',s?'Current sweet spot: '+sweetW+' W':'Need PL sweep'],
-    ['AI idle', 'Use Miner tab; keep vLLM/miner mutually exclusive on the same GPU']
-  ];
-  insRecommendations.innerHTML=recs.map(x=>'<div class="ins-rec"><b>'+escHtml(x[0])+'</b><span>'+escHtml(x[1])+'</span></div>').join('');
-
   insAnomalies.innerHTML=(d.anomalies||[]).map(a=>insRow(a.run_id||'run',a.text||'')).join('')||'<div class="muted">No obvious TTFT outliers in saved runs.</div>';
  }catch(e){
   insightsCount.textContent='Insights error: '+e.message;
