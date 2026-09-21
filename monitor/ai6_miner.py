@@ -907,9 +907,24 @@ def _status():
             pass
     log = _tail_log()
     parsed = _parse_miner_log(log)
+    # The log intentionally survives miner restarts, but its newest TUI values
+    # are historical once ForgeMiner is stopped. Do not present them as live.
+    live_parsed = parsed if running else {
+        "hashrate": None,
+        "hashrate_unit": parsed.get("hashrate_unit"),
+        "pool_hashrate": None,
+        "pool_hashrate_unit": parsed.get("pool_hashrate_unit"),
+        "avg_1m": None,
+        "avg_1h": None,
+        "avg_24h": None,
+        "accepted": None,
+        "stale": None,
+        "rejected": None,
+        "latency_ms": None,
+    }
     binary = _detect_binary(cfg)
     gpus = _gpu_snapshot()
-    profitability = _profitability(parsed, gpus, cfg)
+    profitability = _profitability(live_parsed, gpus, cfg)
     _record_market_history(profitability)
     kryptex = _kryptex_wallet_stats(cfg.get("wallet"))
     return {
@@ -919,7 +934,8 @@ def _status():
         "vllm_busy": _vllm_busy(),
         "binary_detected": binary,
         "config": cfg,
-        "metrics": parsed,
+        "metrics": live_parsed,
+        "last_session_metrics": parsed if not running else None,
         "gpus": gpus,
         "profitability": profitability,
         "kryptex": kryptex,
@@ -1216,7 +1232,7 @@ def install():
 .miner-config{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:8px;align-items:end}
 .miner-config label,.miner-power-row label{font-size:10px;color:#aaa}.miner-config input,.miner-power-row input,.miner-power-row select{display:block;width:100%;margin-top:4px;padding:7px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}
 .miner-actions,.miner-power-row{display:flex;gap:7px;align-items:end;flex-wrap:wrap;margin-top:10px}.miner-power-row label{min-width:120px}.miner-power-row button{height:32px}
-.miner-cmp-tune{margin:10px 0;background:#121416;border:1px solid #30343a;border-radius:9px;padding:10px}.miner-cmp-tune-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.miner-cmp-tune-head b{display:block}.miner-cmp-tune-head small{display:block;color:#8f969c;font-size:10px;margin-top:2px}.miner-cmp-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.miner-cmp-actions select{padding:6px 8px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}.miner-cmp-raw{margin:7px 0 0;white-space:pre-wrap;color:#bfc5ca;font-size:10px;line-height:1.35;max-height:120px;overflow:auto}
+.miner-cmp-tune{margin:10px 0;background:#121416;border:1px solid #30343a;border-radius:9px;padding:10px}.miner-cmp-tune.cmp-mismatch{border-color:#8a6a24;box-shadow:0 0 0 1px rgba(255,213,106,.08) inset}.miner-cmp-tune-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.miner-cmp-tune-head b{display:block}.miner-cmp-tune-head small{display:block;color:#8f969c;font-size:10px;margin-top:2px}.miner-cmp-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.miner-cmp-actions select{padding:6px 8px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}.miner-cmp-raw{margin:7px 0 0;white-space:pre-wrap;color:#bfc5ca;font-size:10px;line-height:1.35;max-height:120px;overflow:auto}
 .miner-start{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.miner-stop{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}
 .miner-kryptex-panel{margin-top:10px;background:#121416;border:1px solid #30343a;border-radius:9px;padding:10px}.miner-kryptex-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.miner-kryptex-head b{display:block}.miner-kryptex-head small{display:block;color:#8f969c;font-size:10px;margin-top:2px}.miner-kryptex-links{display:flex;gap:6px;flex-wrap:wrap}.miner-kryptex-links a{color:#79bfff;text-decoration:none;border:1px solid #315d7b;background:#14212a;border-radius:6px;padding:5px 8px;font-size:10px}.miner-kryptex-grid{display:grid;grid-template-columns:repeat(6,minmax(140px,1fr));gap:7px;margin-top:9px}.miner-kryptex-grid>div{background:#101214;border:1px solid #292d31;border-radius:7px;padding:8px}.miner-kryptex-grid span,.miner-kryptex-grid small{display:block;color:#8f969c;font-size:10px}.miner-kryptex-grid b{display:block;color:#eee;font-size:16px;margin:3px 0}
 .miner-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.miner-log-head{display:flex;justify-content:space-between;align-items:center;color:#888;font-size:10px}.miner-log-head button{padding:4px 8px;font-size:10px}.miner-log-wrap pre{margin:7px 0 0;max-height:330px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
@@ -1229,6 +1245,7 @@ def install():
     js = r'''
 let minerConfigLoaded=false;
 let minerCmpDesiredProfile='manual';
+let minerCmpActiveProfile='manual';
 
 function minerFmtUptime(s){
  if(s==null)return '—';
@@ -1263,17 +1280,17 @@ async function refreshMiner(){
   minerState.textContent=s.running?'● RUNNING':'● STOPPED';
   minerState.className='status '+(s.running?'ready':'down');
   const m=s.metrics||{};
-  minerHashrate.textContent=m.hashrate==null?'—':Number(m.hashrate).toFixed(2)+' '+(m.hashrate_unit||'');
-  minerAlgo.textContent=(m.avg_1m==null?'':'avg 1m '+Number(m.avg_1m).toFixed(2)+' TH/s • ')+((s.config&&s.config.algorithm)||'pearlhash');
-  minerShares.textContent=(m.accepted||0)+' / '+(m.stale||0)+' / '+(m.rejected||0);
-  minerLatency.textContent=(m.latency_ms==null?'A / S / R':'A / S / R • '+m.latency_ms+' ms')+(m.pool_hashrate==null?'':' • pool '+Number(m.pool_hashrate).toFixed(2)+' '+(m.pool_hashrate_unit||''));
+  minerHashrate.textContent=(!s.running||m.hashrate==null)?'—':Number(m.hashrate).toFixed(2)+' '+(m.hashrate_unit||'');
+  minerAlgo.textContent=!s.running?(((s.config&&s.config.algorithm)||'pearlhash')+' • stopped'):((m.avg_1m==null?'':'avg 1m '+Number(m.avg_1m).toFixed(2)+' TH/s • ')+((s.config&&s.config.algorithm)||'pearlhash'));
+  minerShares.textContent=!s.running?'—':((m.accepted??0)+' / '+(m.stale??0)+' / '+(m.rejected??0));
+  minerLatency.textContent=!s.running?'miner stopped':((m.latency_ms==null?'A / S / R':'A / S / R • '+m.latency_ms+' ms')+(m.pool_hashrate==null?'':' • pool '+Number(m.pool_hashrate).toFixed(2)+' '+(m.pool_hashrate_unit||'')));
   minerUptime.textContent=minerFmtUptime(s.uptime_s);
   minerPid.textContent='PID '+(s.pid??'—');
   minerAiState.textContent=s.vllm_busy?'AI BUSY':'IDLE';
   minerAiState.className=s.vllm_busy?'bad':'ok';
   minerLogPath.textContent=s.log_path||'ForgeMiner log';
   renderMinerGpuGrid(s.gpus||[],String((s.config||{}).gpu||'0'));
-  renderMinerProfitability(s.profitability||{});
+  renderMinerProfitability(s.profitability||{},s.running);
   renderKryptexStats(s.kryptex||{});
   refreshCmpTune();
  }catch(e){minerMsg.textContent='Status error: '+e.message;}
@@ -1289,10 +1306,10 @@ function minerHash(v){
  if(n>=1e9)return (n/1e9).toFixed(2)+' GH/s';
  return n.toFixed(0)+' H/s';
 }
-function renderMinerProfitability(p){
+function renderMinerProfitability(p,running=true){
  const m=p.market||{};
- minerEfficiency.textContent=p.efficiency_hashrate_per_w==null?'—':Number(p.efficiency_hashrate_per_w).toFixed(3)+' TH/s/W';
- minerEfficiencySub.textContent='current GPU hashrate / '+minerNum(p.power_w,1)+' W';
+ minerEfficiency.textContent=(!running||p.efficiency_hashrate_per_w==null)?'—':Number(p.efficiency_hashrate_per_w).toFixed(3)+' TH/s/W';
+ minerEfficiencySub.textContent=running?('current GPU hashrate / '+minerNum(p.power_w,1)+' W'):'miner stopped';
  minerPrlPrice.textContent=m.prl_usdt==null?'—':'$'+Number(m.prl_usdt).toFixed(4);
  minerPriceSource.textContent=(m.price_source||'price unavailable')+(m.usd_kzt?' • USD/KZT '+Number(m.usd_kzt).toFixed(1):'');
  minerNetwork.textContent=minerHash(m.network_hashrate_hs);
@@ -1385,7 +1402,14 @@ async function refreshCmpTune(){
    (d.profiles||[]).forEach(p=>{if(!Array.from(sel.options).some(o=>o.value===p)){const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o);}});
    if(Array.from(sel.options).some(o=>o.value===wanted)) sel.value=wanted;
   }
-  minerCmpTuneState.textContent=d.installed?('active: '+(d.active_profile||'manual')+(d.control_installed?'':' • control helper missing')):'cmp-tune not installed';
+  minerCmpActiveProfile=d.active_profile||'manual';
+  const selected=sel?(sel.value||'manual'):'manual';
+  const mismatch=d.installed && selected!==minerCmpActiveProfile;
+  const panel=document.querySelector('.miner-cmp-tune');
+  if(panel) panel.classList.toggle('cmp-mismatch',mismatch);
+  minerCmpTuneState.textContent=d.installed
+    ? ('active: '+minerCmpActiveProfile+(mismatch?' • ⚠ selected: '+selected:'')+(d.control_installed?'':' • control helper missing'))
+    : 'cmp-tune not installed';
   minerCmpTuneRaw.textContent=d.status_raw||d.error||'';
  }catch(e){minerCmpTuneState.textContent='cmp-tune error: '+e.message;}
 }
@@ -1401,12 +1425,12 @@ async function applyCmpTune(){
  const p=minerCmpProfile.value;
  if(p==='manual'){minerCmpTuneState.textContent='Manual PL selected';return null;}
  minerCmpTuneState.textContent='Applying '+p+'…';
- try{const d=await cmpTuneControl('apply',p);minerCmpTuneState.textContent='Applied '+p;return d;}catch(e){minerCmpTuneState.textContent='Apply error: '+e.message;throw e;}
+ try{const d=await cmpTuneControl('apply',p);minerCmpActiveProfile=p;minerCmpTuneState.textContent='Applied '+p;return d;}catch(e){minerCmpTuneState.textContent='Apply error: '+e.message;throw e;}
 }
 
 async function resetCmpTune(){
  minerCmpTuneState.textContent='Resetting…';
- try{const d=await cmpTuneControl('reset','');minerCmpProfile.value='manual';minerCmpDesiredProfile='manual';minerCmpTuneState.textContent='CMP tune reset';return d;}catch(e){minerCmpTuneState.textContent='Reset error: '+e.message;throw e;}
+ try{const d=await cmpTuneControl('reset','');minerCmpProfile.value='manual';minerCmpDesiredProfile='manual';minerCmpActiveProfile='manual';minerCmpTuneState.textContent='CMP tune reset';return d;}catch(e){minerCmpTuneState.textContent='Reset error: '+e.message;throw e;}
 }
 
 async function controlMiner(action){
@@ -1415,8 +1439,14 @@ async function controlMiner(action){
   if(!confirm('Start ForgeMiner on selected GPU(s)?'))return;
   try{
    const cmpProfile=(document.getElementById('minerCmpProfile')?minerCmpProfile.value:'manual');
-   if(cmpProfile && cmpProfile!=='manual') await applyCmpTune();
-   else await setMinerPowerLimit(true);
+   if(cmpProfile && cmpProfile!=='manual'){
+    await applyCmpTune();
+   }else{
+    if(minerCmpActiveProfile && minerCmpActiveProfile!=='manual'){
+      throw new Error('CMP profile '+minerCmpActiveProfile+' is active. Select it, or press Reset before using Manual PL.');
+    }
+    await setMinerPowerLimit(true);
+   }
   }catch(e){
    minerMsg.textContent='Start blocked: '+e.message;
    return;
