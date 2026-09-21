@@ -29,6 +29,7 @@ _MINER_LOG = Path(os.environ.get("AI6_MINER_LOG", str(_STATE_DIR / "forge-miner.
 _MINER_PID = Path(os.environ.get("AI6_MINER_PID", str(_STATE_DIR / "forge-miner.pid")))
 _MARKET_CACHE = {"ts": 0.0, "data": {}}
 _KRYPTEX_CACHE = {"ts": 0.0, "wallet": "", "data": {}}
+_MARKET_HISTORY = Path(os.environ.get("AI6_MARKET_HISTORY", str(_STATE_DIR / "prl-market-history.json")))
 
 _DEFAULT_CFG = {
     "name": "Pearl / PearlHash",
@@ -646,6 +647,8 @@ def _profitability(parsed, gpus, cfg):
 
     return {
         "efficiency_hashrate_per_w": eff,
+        "miner_hashrate": parsed.get("avg_1m") or parsed.get("hashrate"),
+        "miner_hashrate_unit": parsed.get("hashrate_unit") or "TH/s",
         "power_w": power_w,
         "energy_kzt_kwh": energy_rate,
         "pool_fee_pct": float(cfg.get("pool_fee_pct") or 0),
@@ -772,6 +775,59 @@ def _kryptex_wallet_stats(wallet):
     return out
 
 
+
+def _record_market_history(profitability):
+    """Persist a compact PRL/network/profit snapshot at most every 10 minutes."""
+    try:
+        p = profitability or {}
+        m = p.get("market") or {}
+        price = m.get("prl_usdt")
+        net = p.get("net_kzt_day")
+        if price is None and net is None:
+            return
+
+        now = int(time.time())
+        rows = []
+        if _MARKET_HISTORY.is_file():
+            try:
+                data = json.loads(_MARKET_HISTORY.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    rows = [x for x in data if isinstance(x, dict)]
+            except Exception:
+                rows = []
+
+        if rows and now - int(rows[-1].get("ts") or 0) < 600:
+            return
+
+        row = {
+            "ts": now,
+            "price_usdt": price,
+            "network_hashrate_hs": m.get("network_hashrate_hs"),
+            "difficulty": m.get("difficulty"),
+            "block_time_s": m.get("block_time_s"),
+            "block_reward_prl": m.get("block_reward_prl"),
+            "hashrate": p.get("miner_hashrate"),
+            "hashrate_unit": p.get("miner_hashrate_unit"),
+            "power_w": p.get("power_w"),
+            "gross_kzt_day": p.get("gross_kzt_day"),
+            "electricity_kzt_day": p.get("electricity_kzt_day"),
+            "net_kzt_day": net,
+            "prl_day": p.get("prl_day"),
+            "usd_kzt": m.get("usd_kzt"),
+        }
+        rows.append(row)
+
+        # Keep up to 45 days at 10-minute cadence with some margin.
+        cutoff = now - 45 * 86400
+        rows = [x for x in rows if int(x.get("ts") or 0) >= cutoff][-7000:]
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _MARKET_HISTORY.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_MARKET_HISTORY)
+    except Exception:
+        pass
+
+
 def _status():
     cfg = _load_cfg()
     proc = _miner_proc()
@@ -789,6 +845,7 @@ def _status():
     binary = _detect_binary(cfg)
     gpus = _gpu_snapshot()
     profitability = _profitability(parsed, gpus, cfg)
+    _record_market_history(profitability)
     kryptex = _kryptex_wallet_stats(cfg.get("wallet"))
     return {
         "running": running,
