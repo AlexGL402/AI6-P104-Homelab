@@ -1,7 +1,7 @@
 """
 title: AI6 Token Stats Event
 author: AlexGL402
-version: 0.3.0
+version: 0.4.0
 """
 
 from pydantic import BaseModel, Field
@@ -78,7 +78,21 @@ class Event:
         speed = self._num(metrics, "predicted_per_second")
         ms = self._num(metrics, "predicted_ms", "eval_ms")
         seconds = ms / 1000.0 if ms is not None else None
-        if speed is None and output and seconds:
+
+        # vLLM/Open WebUI fallback: usage has token counts but usually no
+        # generation timing. Estimate end-to-end response time from the
+        # persisted assistant message timestamp to chat.finished.
+        if seconds is None:
+            event_finished = self._num(event, "created_at")
+            message_started = self._num(message, "timestamp")
+            if (
+                event_finished is not None
+                and message_started is not None
+                and event_finished > message_started
+            ):
+                seconds = float(event_finished - message_started)
+
+        if speed is None and output and seconds and seconds > 0:
             speed = output / seconds
 
         # Compact line, matching the style of llama.cpp frontends:
