@@ -253,7 +253,7 @@ def _parse_miner_log(text):
     # multiple GPUs. Fall back to GPU0 during early startup or older miner output.
     total_row_re = re.compile(
         r"\|\s*-\s+\d+\s+GPU\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
-        r"\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
+        r"\s+(?:(?:([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s))|--)"
         r"\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*\|",
         re.I,
     )
@@ -268,8 +268,8 @@ def _parse_miner_log(text):
         if m:
             rate = float(m.group(1))
             rate_unit = m.group(2)
-            pool_rate = float(m.group(3))
-            pool_rate_unit = m.group(4)
+            pool_rate = float(m.group(3)) if m.group(3) is not None else None
+            pool_rate_unit = m.group(4) if m.group(4) is not None else None
             accepted = int(m.group(5))
             stale = int(m.group(6))
             rejected = int(m.group(7))
