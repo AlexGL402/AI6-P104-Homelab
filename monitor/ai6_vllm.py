@@ -348,6 +348,8 @@ def _start_vllm(cmd):
         "--gpu-memory-utilization", f"{cmd.gpu_memory_utilization:.3f}",
         "--max-model-len", str(cmd.max_model_len),
         "--tensor-parallel-size", str(len(gpu_ids)),
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "hermes",
     ]
     if cmd.enforce_eager:
         args.append("--enforce-eager")
@@ -1614,7 +1616,14 @@ def install():
     <div class="vllm-form">
       <label>Model<div class="vllm-model-row"><select id="vllmModel"></select><button type="button" title="Reload model list" onclick="loadVllmModels(true)">↻</button></div></label>
       <label>Port<input id="vllmPort" type="number" value="8012" min="1024" max="65535"></label>
-      <label>Context<input id="vllmCtx" type="number" value="4096" min="256"></label>
+      <label>Context
+        <select id="vllmCtx">
+          <option value="4096">4096</option>
+          <option value="8192">8192</option>
+          <option value="12288" selected>12288</option>
+          <option value="16384">16384</option>
+        </select>
+      </label>
       <label>GPU memory<input id="vllmMem" type="number" value="0.90" min="0.10" max="0.99" step="0.01"></label>
       <label class="vllm-check"><input id="vllmEager" type="checkbox"> Enforce eager</label>
       <label>GPUs<div id="vllmGpuSelect" class="vllm-gpu-select"><span class="muted">detecting…</span></div></label>
@@ -1877,7 +1886,7 @@ function renderGpuSelector(devices,runningIds){
  const box=document.getElementById('vllmGpuSelect');
  if(!box)return;
  const current=selectedVllmGpuIds();
- const selected=current.length?current:(runningIds&&runningIds.length?runningIds:[0]);
+ const selected=current.length?current:(runningIds&&runningIds.length?runningIds:(devices||[]).map((_,i)=>i));
  box.innerHTML=(devices||[]).map((g,i)=>{
    const checked=selected.includes(i)?' checked':'';
    return '<label class="vllm-gpu-choice"><input type="checkbox" value="'+i+'"'+checked+'>#'+i+' '+escHtml(g.name||'GPU')+'</label>';
@@ -1958,11 +1967,17 @@ async function refreshGpuPowerLimitInfo(){
 async function setGpuPowerLimit(){
  const watts=Number(vllmPlCustom.value);
  if(!Number.isFinite(watts)){vllmMsg.textContent='Invalid power limit';return;}
- vllmMsg.textContent='Setting PL '+watts+' W…';
+ const gpuIds=selectedVllmGpuIds();
+ if(!gpuIds.length){vllmMsg.textContent='Select at least one GPU';return;}
+ vllmMsg.textContent='Setting PL '+watts+' W on GPU '+gpuIds.join(', ')+'…';
  try{
-  const r=await fetch('/api/gpu/power-limit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gpu:0,watts:watts})});
-  const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  vllmMsg.textContent='GPU PL set to '+d.current_w.toFixed(0)+' W';
+  const results=[];
+  for(const gpu of gpuIds){
+   const r=await fetch('/api/gpu/power-limit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({gpu:gpu,watts:watts})});
+   const d=await r.json();if(!r.ok)throw new Error('GPU #'+gpu+': '+(d.detail||JSON.stringify(d)));
+   results.push('#'+gpu+' '+d.current_w.toFixed(0)+' W');
+  }
+  vllmMsg.textContent='GPU PL set: '+results.join(' • ');
   await refreshGpuPowerLimitInfo();
   await refreshVllm();
  }catch(e){vllmMsg.textContent='PL error: '+e.message;}
@@ -2090,12 +2105,14 @@ async function refreshVllm(){
     vllmRam.className=ramPct>=90?'bad':ramPct>=75?'warn':'ok';
     vllmRamSub.textContent=(h.memory.used_bytes/1073741824).toFixed(2)+' / '+(h.memory.total_bytes/1073741824).toFixed(2)+' GiB';
     const devices=(h.gpu.devices||[]);
-    renderGpuSelector(devices,s.gpu_ids||[0]);
-    renderVllmGpuGrid(devices,s.gpu_ids||[0]);
-    const selected=(s.gpu_ids||[0]).map(i=>devices[i]).filter(Boolean);
+    const activeGpuIds=s.running?(s.gpu_ids||[]):[];
+    renderGpuSelector(devices,activeGpuIds);
+    const selectedGpuIds=selectedVllmGpuIds();
+    renderVllmGpuGrid(devices,selectedGpuIds);
+    const selected=selectedGpuIds.map(i=>devices[i]).filter(Boolean);
     const totalPl=selected.reduce((a,g)=>a+(Number(g.power_limit_w)||0),0);
     benchPl.textContent=selected.length>1?totalPl.toFixed(0)+' W total':((selected[0]&&selected[0].power_limit_w)??'?')+' W';
-    benchGpu.textContent=(s.gpu_ids||[0]).map(i=>'#'+i+' '+((devices[i]&&devices[i].name)||'GPU')).join(' + ');
+    benchGpu.textContent=selectedGpuIds.map(i=>'#'+i+' '+((devices[i]&&devices[i].name)||'GPU')).join(' + ');
    }
   }catch(_e){}
  }catch(e){vllmState.textContent='● ERROR';vllmState.className='status error';vllmMsg.textContent='Status error: '+e.message;}
