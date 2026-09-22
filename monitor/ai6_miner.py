@@ -1161,7 +1161,8 @@ async function refreshMiner(){
   minerState.textContent=s.running?'● RUNNING':'● STOPPED';
   minerState.className='status '+(s.running?'ready':'down');
   const m=s.metrics||{};
-  minerHashrate.textContent=m.hashrate==null?'—':Number(m.hashrate).toFixed(2)+' '+(m.hashrate_unit||'');
+  const displayHashrate=(m.avg_1m!=null?m.avg_1m:m.hashrate);
+  minerHashrate.textContent=displayHashrate==null?'—':Number(displayHashrate).toFixed(2)+' '+(m.hashrate_unit||'');
   minerAlgo.textContent=(m.avg_1m==null?'':'avg 1m '+Number(m.avg_1m).toFixed(2)+' TH/s • ')+((s.config&&s.config.algorithm)||'pearlhash');
   minerShares.textContent=(m.accepted||0)+' / '+(m.stale||0)+' / '+(m.rejected||0);
   minerLatency.textContent=(m.latency_ms==null?'A / S / R':'A / S / R • '+m.latency_ms+' ms')+(m.pool_hashrate==null?'':' • pool '+Number(m.pool_hashrate).toFixed(2)+' '+(m.pool_hashrate_unit||''));
@@ -1171,7 +1172,7 @@ async function refreshMiner(){
   minerAiState.className=s.vllm_busy?'bad':'ok';
   minerLogPath.textContent=s.log_path||'ForgeMiner log';
   renderMinerGpuGrid(s.gpus||[],String((s.config||{}).gpu||'0'));
-  renderMinerProfitability(s.profitability||{});
+  renderMinerProfitability(s.profitability||{},m);
   renderKryptexStats(s.kryptex||{});
  }catch(e){minerMsg.textContent='Status error: '+e.message;}
 }
@@ -1186,10 +1187,14 @@ function minerHash(v){
  if(n>=1e9)return (n/1e9).toFixed(2)+' GH/s';
  return n.toFixed(0)+' H/s';
 }
-function renderMinerProfitability(p){
+function renderMinerProfitability(p,metrics){
  const m=p.market||{};
- minerEfficiency.textContent=p.efficiency_hashrate_per_w==null?'—':Number(p.efficiency_hashrate_per_w).toFixed(3)+' TH/s/W';
- minerEfficiencySub.textContent='current GPU hashrate / '+minerNum(p.power_w,1)+' W';
+ const mm=metrics||{};
+ const totalHashrate=(mm.avg_1m!=null?Number(mm.avg_1m):(mm.hashrate!=null?Number(mm.hashrate):null));
+ const totalPower=(p.power_w!=null?Number(p.power_w):0);
+ const uiEfficiency=(totalHashrate!=null&&totalPower>0)?(totalHashrate/totalPower):p.efficiency_hashrate_per_w;
+ minerEfficiency.textContent=uiEfficiency==null?'—':Number(uiEfficiency).toFixed(3)+' TH/s/W';
+ minerEfficiencySub.textContent='avg 1m total hashrate / '+minerNum(p.power_w,1)+' W';
  minerPrlPrice.textContent=m.prl_usdt==null?'—':'$'+Number(m.prl_usdt).toFixed(4);
  minerPriceSource.textContent=(m.price_source||'price unavailable')+(m.usd_kzt?' • USD/KZT '+Number(m.usd_kzt).toFixed(1):'');
  minerNetwork.textContent=minerHash(m.network_hashrate_hs);
