@@ -1628,6 +1628,7 @@ def install():
             <option value="184">184 W</option>
             <option value="200">200 W</option>
             <option value="220">220 W</option>
+            <option value="225">225 W</option>
             <option value="custom">Custom</option>
           </select>
           <input id="vllmPlCustom" type="number" value="150" min="1" max="1000" step="1">
