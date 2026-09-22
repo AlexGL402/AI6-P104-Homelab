@@ -672,3 +672,164 @@ Failed to initialize NVML: Driver/library version mismatch
 ```
 
 Поэтому для воспроизводимого CMP-теста сохранять связку **610.43.03 userspace + 610.43.03 forge-cmp kernel modules**.
+
+
+### A.7. ВАЖНО: known-good Forge CMP backup и bug initramfs hook (22.09.2026)
+
+На рабочей CMP 50HX подтверждён следующий стек после reboot:
+
+```text
+NVIDIA-SMI 610.43.03
+KMD Version: 610.43.03
+CUDA UMD Version: 13.3
+GPU: NVIDIA CMP 50HX
+VRAM: 10240 MiB
+kernel: 6.8.0-139-generic
+module: /lib/modules/6.8.0-139-generic/updates/forge-cmp/nvidia.ko
+license: Dual MIT/GPL
+```
+
+Старый known-good комплект модулей от 20.09.2026 хранится локально на AI6:
+
+```text
+/root/forge-cmp-backup/forge-cmp/
+```
+
+Он содержит все пять модулей:
+
+```text
+nvidia.ko
+nvidia-modeset.ko
+nvidia-drm.ko
+nvidia-uvm.ko
+nvidia-peermem.ko
+```
+
+Проверенный `nvidia.ko`:
+
+```text
+version: 610.43.03
+license: Dual MIT/GPL
+vermagic: 6.8.0-139-generic SMP preempt mod_unload modversions
+SHA256: 32a2a6779ce174ade2360a456e0413818682b1d7f8d9dc959f41d530772ce93d
+```
+
+SHA256 known-good набора:
+
+```text
+nvidia-drm.ko      f7393764d9210e64307650b4153bc55a39b68c66eb7bbd867d7a2ae440602b2f
+nvidia.ko          32a2a6779ce174ade2360a456e0413818682b1d7f8d9dc959f41d530772ce93d
+nvidia-modeset.ko  02f9ab7507276f4c9edfd320ea45551db131b8c5ee4ba2cbab913758d838ac97
+nvidia-peermem.ko  8da281efee29d7e9a26ca49923a8db94c862929412c247b721ca3314b8d1ca3c
+nvidia-uvm.ko      3ecbf0e5c97d855365773a21f21b1f691d866f3af881585d1cfcc57075a3cfa3
+```
+
+#### Важно: ForgeMiner 1.8.0 initramfs hook оказался неполным
+
+Во время повторной установки Forge CMP сборка пяти модулей завершилась успешно, но `update-initramfs` падал:
+
+```text
+E: /etc/initramfs-tools/hooks/forge-cmp failed with return 1.
+```
+
+Причина: созданный hook использовал `${version}`, которая могла быть пустой, и копировал только `nvidia.ko`. В результате initramfs содержал только один patched module.
+
+Рабочий hook должен копировать все пять модулей и иметь fallback на текущее ядро:
+
+```sh
+#!/bin/sh
+PREREQ=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+KVER="${version:-$(uname -r)}"
+BASE="/lib/modules/${KVER}/updates/forge-cmp"
+
+for mod in \
+    nvidia.ko \
+    nvidia-modeset.ko \
+    nvidia-drm.ko \
+    nvidia-uvm.ko \
+    nvidia-peermem.ko
+do
+    if [ -f "${BASE}/${mod}" ]; then
+        copy_file module "${BASE}/${mod}"
+    else
+        echo "forge-cmp: missing ${BASE}/${mod}" >&2
+        exit 1
+    fi
+done
+
+exit 0
+```
+
+После исправления:
+
+```bash
+sudo chmod 755 /etc/initramfs-tools/hooks/forge-cmp
+sudo depmod -a
+sudo update-initramfs -u -k "$(uname -r)"
+lsinitramfs /boot/initrd.img-$(uname -r) | grep 'updates/forge-cmp'
+```
+
+В initramfs обязаны присутствовать все пять:
+
+```text
+nvidia.ko
+nvidia-modeset.ko
+nvidia-drm.ko
+nvidia-uvm.ko
+nvidia-peermem.ko
+```
+
+Если fresh rebuild отличается от known-good, сначала сохранить его:
+
+```bash
+sudo cp -a /lib/modules/$(uname -r)/updates/forge-cmp /root/forge-cmp-new-$(date +%Y%m%d)
+```
+
+Восстановление known-good набора:
+
+```bash
+sudo bash -c 'cp -f /root/forge-cmp-backup/forge-cmp/nvidia*.ko /lib/modules/'"$(uname -r)"'/updates/forge-cmp/'
+sudo depmod -a
+sudo update-initramfs -u -k "$(uname -r)"
+```
+
+Перед reboot обязательно проверить:
+
+```bash
+modinfo nvidia | egrep 'filename|version|license'
+lsinitramfs /boot/initrd.img-$(uname -r) | grep 'updates/forge-cmp'
+```
+
+После reboot:
+
+```bash
+nvidia-smi
+```
+
+Для текущей рабочей машины подтверждено:
+
+```text
+filename: /lib/modules/6.8.0-139-generic/updates/forge-cmp/nvidia.ko
+version: 610.43.03
+license: Dual MIT/GPL
+NVIDIA-SMI: 610.43.03
+KMD: 610.43.03
+CUDA UMD: 13.3
+CMP 50HX: detected, 10240 MiB
+```
+
+> Не удалять `/root/forge-cmp-backup/forge-cmp/` до тех пор, пока known-good архив не сохранён отдельно. Этот backup позволяет вернуть рабочий CMP stack без повторной компиляции.
