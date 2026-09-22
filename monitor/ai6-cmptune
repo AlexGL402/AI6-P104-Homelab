@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CMP_TUNE=/usr/local/sbin/cmp-tune
+
+if [[ $EUID -ne 0 ]]; then
+  echo "ai6-cmptune must run as root" >&2
+  exit 1
+fi
+if [[ ! -x "$CMP_TUNE" ]]; then
+  echo "cmp-tune not installed at $CMP_TUNE" >&2
+  exit 2
+fi
+
+cmd="${1:-}"
+case "$cmd" in
+  apply)
+    profile="${2:-}"
+    if [[ ! "$profile" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+      echo "invalid profile name" >&2
+      exit 3
+    fi
+    exec "$CMP_TUNE" apply "$profile"
+    ;;
+  reset)
+    exec "$CMP_TUNE" reset
+    ;;
+  *)
+    echo "usage: ai6-cmptune {apply PROFILE|reset}" >&2
+    exit 64
+    ;;
+esac

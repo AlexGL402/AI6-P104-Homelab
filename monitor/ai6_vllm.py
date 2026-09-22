@@ -1628,6 +1628,7 @@ def install():
             <option value="184">184 W</option>
             <option value="200">200 W</option>
             <option value="220">220 W</option>
+            <option value="225">225 W</option>
             <option value="custom">Custom</option>
           </select>
           <input id="vllmPlCustom" type="number" value="150" min="1" max="1000" step="1">
@@ -2272,6 +2273,11 @@ function filteredBenchHistory(){
    if(f.model&&model!==f.model)return false;
    if(f.quant&&quant!==f.quant)return false;
    if(f.conc&&String(x.concurrency)!==f.conc)return false;
+   if(f.out&&String(x.max_tokens??'')!==f.out)return false;
+   if(f.prompt_profile&&String(x.prompt_profile||'').toLowerCase()!==f.prompt_profile)return false;
+   if(f.temp&&String(x.temperature??'')!==f.temp)return false;
+   if(f.thinking==='on'&&!x.enable_thinking)return false;
+   if(f.thinking==='off'&&x.enable_thinking)return false;
    const pcieLabel=(x.pcie||[]).map(p=>'GPU'+p.index+': G'+(p.gen_current??'?')+' x'+(p.width_current??'?')).join(' + ').toLowerCase();
    if(f.pcie&&pcieLabel!==f.pcie)return false;
    if(f.gpus&&_benchGpuLabel(x).toLowerCase()!==f.gpus)return false;

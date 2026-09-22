@@ -27,6 +27,9 @@ _STATE_DIR = Path(os.environ.get("AI6_MONITOR_STATE_DIR", str(Path.home() / ".lo
 _MINER_CFG = Path(os.environ.get("AI6_MINER_CONFIG", str(_STATE_DIR / "miner-config.json")))
 _MINER_LOG = Path(os.environ.get("AI6_MINER_LOG", str(_STATE_DIR / "forge-miner.log")))
 _MINER_PID = Path(os.environ.get("AI6_MINER_PID", str(_STATE_DIR / "forge-miner.pid")))
+_CMP_TUNE_STATE = Path(os.environ.get("AI6_CMP_TUNE_STATE", str(_STATE_DIR / "cmp-tune-state.json")))
+_CMP_TUNE_BIN = os.environ.get("AI6_CMP_TUNE_BIN", "/usr/local/sbin/cmp-tune")
+_CMP_TUNE_CTL = os.environ.get("AI6_CMP_TUNE_CTL", "/usr/local/sbin/ai6-cmptune")
 _MARKET_CACHE = {"ts": 0.0, "data": {}}
 _KRYPTEX_CACHE = {"ts": 0.0, "wallet": "", "data": {}}
 _MARKET_HISTORY = Path(os.environ.get("AI6_MARKET_HISTORY", str(_STATE_DIR / "prl-market-history.json")))
@@ -44,6 +47,7 @@ _DEFAULT_CFG = {
     "temp_resume": 70,
     "energy_kzt_kwh": 35.0,
     "pool_fee_pct": 2.0,
+    "cmp_tune_profile": "manual",
 }
 
 
@@ -60,10 +64,16 @@ class MinerConfigCommand(BaseModel):
     temp_resume: int = Field(default=70, ge=30, le=100)
     energy_kzt_kwh: float = Field(default=35.0, ge=0, le=10000)
     pool_fee_pct: float = Field(default=2.0, ge=0, le=100)
+    cmp_tune_profile: str = Field(default="manual", max_length=64)
 
 
 class MinerActionCommand(BaseModel):
     action: str
+
+
+class CmpTuneCommand(BaseModel):
+    action: str
+    profile: str = Field(default="", max_length=64)
 
 
 def _load_cfg():
@@ -81,6 +91,61 @@ def _load_cfg():
 def _save_cfg(cfg):
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     _MINER_CFG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _cmp_tune_read_state():
+    try:
+        if _CMP_TUNE_STATE.is_file():
+            data = json.loads(_CMP_TUNE_STATE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"profile": "manual"}
+
+
+def _cmp_tune_write_state(profile):
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _CMP_TUNE_STATE.write_text(
+        json.dumps({"profile": profile, "updated_at": int(time.time())}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _cmp_tune_run(args, timeout=6.0):
+    if not Path(_CMP_TUNE_BIN).is_file():
+        return 127, "", f"cmp-tune not found at {_CMP_TUNE_BIN}"
+    try:
+        p = subprocess.run([_CMP_TUNE_BIN, *args], capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _cmp_tune_profiles():
+    rc, out, err = _cmp_tune_run(["list"])
+    profiles = []
+    if rc == 0:
+        for line in out.splitlines():
+            m = re.match(r"^\s*([A-Za-z0-9_.-]+)\s+", line)
+            if m and m.group(1) != "config":
+                profiles.append(m.group(1))
+    return profiles, out, err
+
+
+def _cmp_tune_status():
+    profiles, list_raw, list_err = _cmp_tune_profiles()
+    rc, status_raw, status_err = _cmp_tune_run(["status"])
+    state = _cmp_tune_read_state()
+    return {
+        "installed": Path(_CMP_TUNE_BIN).is_file(),
+        "control_installed": Path(_CMP_TUNE_CTL).is_file(),
+        "profiles": profiles,
+        "active_profile": state.get("profile") or "manual",
+        "status_raw": status_raw,
+        "list_raw": list_raw,
+        "error": status_err or list_err or (None if rc == 0 else "cmp-tune status failed"),
+    }
 
 
 def _detect_binary(cfg=None):
@@ -842,9 +907,24 @@ def _status():
             pass
     log = _tail_log()
     parsed = _parse_miner_log(log)
+    # The log intentionally survives miner restarts, but its newest TUI values
+    # are historical once ForgeMiner is stopped. Do not present them as live.
+    live_parsed = parsed if running else {
+        "hashrate": None,
+        "hashrate_unit": parsed.get("hashrate_unit"),
+        "pool_hashrate": None,
+        "pool_hashrate_unit": parsed.get("pool_hashrate_unit"),
+        "avg_1m": None,
+        "avg_1h": None,
+        "avg_24h": None,
+        "accepted": None,
+        "stale": None,
+        "rejected": None,
+        "latency_ms": None,
+    }
     binary = _detect_binary(cfg)
     gpus = _gpu_snapshot()
-    profitability = _profitability(parsed, gpus, cfg)
+    profitability = _profitability(live_parsed, gpus, cfg)
     _record_market_history(profitability)
     kryptex = _kryptex_wallet_stats(cfg.get("wallet"))
     return {
@@ -854,12 +934,49 @@ def _status():
         "vllm_busy": _vllm_busy(),
         "binary_detected": binary,
         "config": cfg,
-        "metrics": parsed,
+        "metrics": live_parsed,
+        "last_session_metrics": parsed if not running else None,
         "gpus": gpus,
         "profitability": profitability,
         "kryptex": kryptex,
         "log_path": str(_MINER_LOG),
     }
+
+
+@base.app.get("/api/cmp-tune/status")
+def api_cmp_tune_status():
+    return _cmp_tune_status()
+
+
+@base.app.post("/api/cmp-tune/control")
+def api_cmp_tune_control(cmd: CmpTuneCommand):
+    action = (cmd.action or "").strip().lower()
+    profile = (cmd.profile or "").strip()
+    if action not in ("apply", "reset"):
+        raise base.HTTPException(status_code=400, detail="action must be apply or reset")
+    if not Path(_CMP_TUNE_CTL).is_file():
+        raise base.HTTPException(
+            status_code=503,
+            detail=f"CMP tune control helper not installed: {_CMP_TUNE_CTL}. Run monitor/install-cmp-tune-control.sh",
+        )
+    argv = ["sudo", "-n", _CMP_TUNE_CTL]
+    if action == "apply":
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", profile):
+            raise base.HTTPException(status_code=400, detail="Invalid profile name")
+        profiles, _, _ = _cmp_tune_profiles()
+        if profile not in profiles:
+            raise base.HTTPException(status_code=400, detail=f"Unknown cmp-tune profile: {profile}")
+        argv += ["apply", profile]
+    else:
+        argv += ["reset"]
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=10.0)
+    except Exception as e:
+        raise base.HTTPException(status_code=500, detail=str(e))
+    if p.returncode != 0:
+        raise base.HTTPException(status_code=500, detail=(p.stderr or p.stdout or "cmp-tune control failed").strip())
+    _cmp_tune_write_state(profile if action == "apply" else "manual")
+    return {"ok": True, "message": (p.stdout or "OK").strip(), "status": _cmp_tune_status()}
 
 
 @base.app.get("/api/miner/status")
@@ -1026,7 +1143,9 @@ def install():
           <option value="140">140 W</option>
           <option value="150">150 W</option>
           <option value="165">165 W</option>
+          <option value="170">170 W</option>
           <option value="184">184 W</option>
+          <option value="225">225 W</option>
           <option value="200">200 W</option>
           <option value="220">220 W</option>
         </select>
@@ -1034,6 +1153,25 @@ def install():
       <label>GPU index<input id="minerPlGpu" type="number" value="0" min="0" max="31"></label>
       <button type="button" onclick="setMinerPowerLimit()">Set PL</button>
       <span id="minerPlMsg" class="muted"></span>
+    </div>
+
+    <div class="miner-cmp-tune">
+      <div class="miner-cmp-tune-head">
+        <div><b>CMP Tune</b><small>NVML profile tuning for CMP 50HX / 90HX</small></div>
+        <div class="miner-cmp-actions">
+          <select id="minerCmpProfile">
+            <option value="manual">Manual PL</option>
+            <option value="stock">stock</option>
+            <option value="quiet">quiet</option>
+            <option value="efficient">efficient</option>
+            <option value="pearl-safe">pearl-safe</option>
+          </select>
+          <button type="button" onclick="applyCmpTune()">Apply</button>
+          <button type="button" onclick="resetCmpTune()">Reset</button>
+        </div>
+      </div>
+      <div id="minerCmpTuneState" class="muted">cmp-tune status —</div>
+      <pre id="minerCmpTuneRaw" class="miner-cmp-raw"></pre>
     </div>
 
     <div id="minerGpuGrid" class="vllm-gpu-grid"></div>
@@ -1094,6 +1232,7 @@ def install():
 .miner-config{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:8px;align-items:end}
 .miner-config label,.miner-power-row label{font-size:10px;color:#aaa}.miner-config input,.miner-power-row input,.miner-power-row select{display:block;width:100%;margin-top:4px;padding:7px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}
 .miner-actions,.miner-power-row{display:flex;gap:7px;align-items:end;flex-wrap:wrap;margin-top:10px}.miner-power-row label{min-width:120px}.miner-power-row button{height:32px}
+.miner-cmp-tune{margin:10px 0;background:#121416;border:1px solid #30343a;border-radius:9px;padding:10px}.miner-cmp-tune.cmp-mismatch{border-color:#8a6a24;box-shadow:0 0 0 1px rgba(255,213,106,.08) inset}.miner-cmp-tune-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.miner-cmp-tune-head b{display:block}.miner-cmp-tune-head small{display:block;color:#8f969c;font-size:10px;margin-top:2px}.miner-cmp-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.miner-cmp-actions select{padding:6px 8px;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px}.miner-cmp-raw{margin:7px 0 0;white-space:pre-wrap;color:#bfc5ca;font-size:10px;line-height:1.35;max-height:120px;overflow:auto}
 .miner-start{border-color:#2f7540!important;color:#72e28a!important;background:#132519!important}.miner-stop{border-color:#7a3434!important;color:#ff8585!important;background:#2a1515!important}
 .miner-kryptex-panel{margin-top:10px;background:#121416;border:1px solid #30343a;border-radius:9px;padding:10px}.miner-kryptex-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.miner-kryptex-head b{display:block}.miner-kryptex-head small{display:block;color:#8f969c;font-size:10px;margin-top:2px}.miner-kryptex-links{display:flex;gap:6px;flex-wrap:wrap}.miner-kryptex-links a{color:#79bfff;text-decoration:none;border:1px solid #315d7b;background:#14212a;border-radius:6px;padding:5px 8px;font-size:10px}.miner-kryptex-grid{display:grid;grid-template-columns:repeat(6,minmax(140px,1fr));gap:7px;margin-top:9px}.miner-kryptex-grid>div{background:#101214;border:1px solid #292d31;border-radius:7px;padding:8px}.miner-kryptex-grid span,.miner-kryptex-grid small{display:block;color:#8f969c;font-size:10px}.miner-kryptex-grid b{display:block;color:#eee;font-size:16px;margin:3px 0}
 .miner-log-wrap{margin-top:10px;background:#101010;border:1px solid #303030;border-radius:8px;padding:8px}.miner-log-head{display:flex;justify-content:space-between;align-items:center;color:#888;font-size:10px}.miner-log-head button{padding:4px 8px;font-size:10px}.miner-log-wrap pre{margin:7px 0 0;max-height:330px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:10px;line-height:1.35;color:#cfcfcf}
@@ -1105,6 +1244,8 @@ def install():
 
     js = r'''
 let minerConfigLoaded=false;
+let minerCmpDesiredProfile='manual';
+let minerCmpActiveProfile='manual';
 
 function minerFmtUptime(s){
  if(s==null)return '—';
@@ -1126,6 +1267,8 @@ function loadMinerConfig(c,detected){
  minerTempResume.value=c.temp_resume||70;
  minerEnergyKzt.value=(c.energy_kzt_kwh??35);
  minerPoolFee.value=(c.pool_fee_pct??2);
+ minerCmpDesiredProfile=c.cmp_tune_profile||'manual';
+ if(document.getElementById('minerCmpProfile')) minerCmpProfile.value=minerCmpDesiredProfile;
  minerConfigLoaded=true;
 }
 
@@ -1137,18 +1280,19 @@ async function refreshMiner(){
   minerState.textContent=s.running?'● RUNNING':'● STOPPED';
   minerState.className='status '+(s.running?'ready':'down');
   const m=s.metrics||{};
-  minerHashrate.textContent=m.hashrate==null?'—':Number(m.hashrate).toFixed(2)+' '+(m.hashrate_unit||'');
-  minerAlgo.textContent=(m.avg_1m==null?'':'avg 1m '+Number(m.avg_1m).toFixed(2)+' TH/s • ')+((s.config&&s.config.algorithm)||'pearlhash');
-  minerShares.textContent=(m.accepted||0)+' / '+(m.stale||0)+' / '+(m.rejected||0);
-  minerLatency.textContent=(m.latency_ms==null?'A / S / R':'A / S / R • '+m.latency_ms+' ms')+(m.pool_hashrate==null?'':' • pool '+Number(m.pool_hashrate).toFixed(2)+' '+(m.pool_hashrate_unit||''));
+  minerHashrate.textContent=(!s.running||m.hashrate==null)?'—':Number(m.hashrate).toFixed(2)+' '+(m.hashrate_unit||'');
+  minerAlgo.textContent=!s.running?(((s.config&&s.config.algorithm)||'pearlhash')+' • stopped'):((m.avg_1m==null?'':'avg 1m '+Number(m.avg_1m).toFixed(2)+' TH/s • ')+((s.config&&s.config.algorithm)||'pearlhash'));
+  minerShares.textContent=!s.running?'—':((m.accepted??0)+' / '+(m.stale??0)+' / '+(m.rejected??0));
+  minerLatency.textContent=!s.running?'miner stopped':((m.latency_ms==null?'A / S / R':'A / S / R • '+m.latency_ms+' ms')+(m.pool_hashrate==null?'':' • pool '+Number(m.pool_hashrate).toFixed(2)+' '+(m.pool_hashrate_unit||'')));
   minerUptime.textContent=minerFmtUptime(s.uptime_s);
   minerPid.textContent='PID '+(s.pid??'—');
   minerAiState.textContent=s.vllm_busy?'AI BUSY':'IDLE';
   minerAiState.className=s.vllm_busy?'bad':'ok';
   minerLogPath.textContent=s.log_path||'ForgeMiner log';
   renderMinerGpuGrid(s.gpus||[],String((s.config||{}).gpu||'0'));
-  renderMinerProfitability(s.profitability||{});
+  renderMinerProfitability(s.profitability||{},s.running);
   renderKryptexStats(s.kryptex||{});
+  refreshCmpTune();
  }catch(e){minerMsg.textContent='Status error: '+e.message;}
 }
 
@@ -1162,10 +1306,10 @@ function minerHash(v){
  if(n>=1e9)return (n/1e9).toFixed(2)+' GH/s';
  return n.toFixed(0)+' H/s';
 }
-function renderMinerProfitability(p){
+function renderMinerProfitability(p,running=true){
  const m=p.market||{};
- minerEfficiency.textContent=p.efficiency_hashrate_per_w==null?'—':Number(p.efficiency_hashrate_per_w).toFixed(3)+' TH/s/W';
- minerEfficiencySub.textContent='current GPU hashrate / '+minerNum(p.power_w,1)+' W';
+ minerEfficiency.textContent=(!running||p.efficiency_hashrate_per_w==null)?'—':Number(p.efficiency_hashrate_per_w).toFixed(3)+' TH/s/W';
+ minerEfficiencySub.textContent=running?('current GPU hashrate / '+minerNum(p.power_w,1)+' W'):'miner stopped';
  minerPrlPrice.textContent=m.prl_usdt==null?'—':'$'+Number(m.prl_usdt).toFixed(4);
  minerPriceSource.textContent=(m.price_source||'price unavailable')+(m.usd_kzt?' • USD/KZT '+Number(m.usd_kzt).toFixed(1):'');
  minerNetwork.textContent=minerHash(m.network_hashrate_hs);
@@ -1237,7 +1381,8 @@ async function saveMinerConfig(){
   wallet:minerWallet.value.trim(),worker:minerWorker.value.trim(),gpu:minerGpu.value.trim(),
   binary:minerBinary.value.trim(),extra_args:minerExtra.value.trim(),
   temp_limit:Number(minerTempLimit.value),temp_resume:Number(minerTempResume.value),
-  energy_kzt_kwh:Number(minerEnergyKzt.value),pool_fee_pct:Number(minerPoolFee.value)
+  energy_kzt_kwh:Number(minerEnergyKzt.value),pool_fee_pct:Number(minerPoolFee.value),
+  cmp_tune_profile:(document.getElementById('minerCmpProfile')?minerCmpProfile.value:'manual')
  };
  minerMsg.textContent='Saving…';
  try{
@@ -1247,12 +1392,61 @@ async function saveMinerConfig(){
  }catch(e){minerMsg.textContent='Save error: '+e.message;}
 }
 
+async function refreshCmpTune(){
+ try{
+  const r=await fetch('/api/cmp-tune/status',{cache:'no-store'});const d=await r.json();
+  if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+  const sel=document.getElementById('minerCmpProfile');
+  if(sel){
+   const wanted=sel.value||minerCmpDesiredProfile||'manual';
+   (d.profiles||[]).forEach(p=>{if(!Array.from(sel.options).some(o=>o.value===p)){const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o);}});
+   if(Array.from(sel.options).some(o=>o.value===wanted)) sel.value=wanted;
+  }
+  minerCmpActiveProfile=d.active_profile||'manual';
+  const selected=sel?(sel.value||'manual'):'manual';
+  const mismatch=d.installed && selected!==minerCmpActiveProfile;
+  const panel=document.querySelector('.miner-cmp-tune');
+  if(panel) panel.classList.toggle('cmp-mismatch',mismatch);
+  minerCmpTuneState.textContent=d.installed
+    ? ('active: '+minerCmpActiveProfile+(mismatch?' • ⚠ selected: '+selected:'')+(d.control_installed?'':' • control helper missing'))
+    : 'cmp-tune not installed';
+  minerCmpTuneRaw.textContent=d.status_raw||d.error||'';
+ }catch(e){minerCmpTuneState.textContent='cmp-tune error: '+e.message;}
+}
+
+async function cmpTuneControl(action,profile=''){
+ const r=await fetch('/api/cmp-tune/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,profile})});
+ const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
+ await refreshCmpTune();
+ return d;
+}
+
+async function applyCmpTune(){
+ const p=minerCmpProfile.value;
+ if(p==='manual'){minerCmpTuneState.textContent='Manual PL selected';return null;}
+ minerCmpTuneState.textContent='Applying '+p+'…';
+ try{const d=await cmpTuneControl('apply',p);minerCmpActiveProfile=p;minerCmpTuneState.textContent='Applied '+p;return d;}catch(e){minerCmpTuneState.textContent='Apply error: '+e.message;throw e;}
+}
+
+async function resetCmpTune(){
+ minerCmpTuneState.textContent='Resetting…';
+ try{const d=await cmpTuneControl('reset','');minerCmpProfile.value='manual';minerCmpDesiredProfile='manual';minerCmpActiveProfile='manual';minerCmpTuneState.textContent='CMP tune reset';return d;}catch(e){minerCmpTuneState.textContent='Reset error: '+e.message;throw e;}
+}
+
 async function controlMiner(action){
  if(action==='start'){
   await saveMinerConfig();
   if(!confirm('Start ForgeMiner on selected GPU(s)?'))return;
   try{
-   await setMinerPowerLimit(true);
+   const cmpProfile=(document.getElementById('minerCmpProfile')?minerCmpProfile.value:'manual');
+   if(cmpProfile && cmpProfile!=='manual'){
+    await applyCmpTune();
+   }else{
+    if(minerCmpActiveProfile && minerCmpActiveProfile!=='manual'){
+      throw new Error('CMP profile '+minerCmpActiveProfile+' is active. Select it, or press Reset before using Manual PL.');
+    }
+    await setMinerPowerLimit(true);
+   }
   }catch(e){
    minerMsg.textContent='Start blocked: '+e.message;
    return;
