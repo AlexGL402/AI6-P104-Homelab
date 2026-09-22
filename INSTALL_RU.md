@@ -833,3 +833,37 @@ CMP 50HX: detected, 10240 MiB
 ```
 
 > Не удалять `/root/forge-cmp-backup/forge-cmp/` до тех пор, пока known-good архив не сохранён отдельно. Этот backup позволяет вернуть рабочий CMP stack без повторной компиляции.
+
+
+### A.8. Подтверждение производительности после восстановления (22.09.2026)
+
+После восстановления known-good Forge CMP modules, исправления initramfs hook и reboot производительность CMP 50HX вернулась к прежнему уровню.
+
+Проверенный vLLM benchmark:
+
+```text
+Model: Qwen3-4B-AWQ
+Concurrency: 12
+Output: 512
+Prompt: 603
+PL: 150 W
+PCIe: Gen1 x4
+Driver/KMD: 610.43.03
+CUDA runtime: 13.0
+Torch: 2.13.0+cu130
+GPU: CMP 50HX 10 GB
+
+Run 1: 632.58 tok/s, 136.4 W avg, 4.636 tok/s/W
+Run 2: 615.10 tok/s, 134.8 W avg, 4.561 tok/s/W
+```
+
+Это подтверждает, что восстановленный `610.43.03 + forge-cmp` стек возвращает ожидаемый compute throughput. На stock 610.57 без Forge CMP unlock тот же класс теста ранее давал около 145 tok/s.
+
+Known-good архив создан локально:
+
+```text
+/home/ai6/forge-cmp-610.43.03-k6.8.0-139-known-good.tar.gz
+size: ~34 MB
+```
+
+Перед переносом/публикацией сохранить и сверить полный SHA256 архива.
