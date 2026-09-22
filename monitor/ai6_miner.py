@@ -180,9 +180,18 @@ def _parse_miner_log(text):
     avg_24h = None
 
     # Forge TUI table rows look like:
-    # | 0  CMP 40HX 8G  40.47 TH/s  78.16 TH/s  3 / 0 / 0 |
-    # The first rate is the GPU hashrate; the second is the pool-side rate.
-    # Read the newest GPU0 row so the dashboard reflects the miner's latest TUI.
+    # | 0  CMP 50HX 10G  74.61 TH/s  78.99 TH/s  10 / 0 / 0 |
+    # | 1  CMP 50HX 10G  73.89 TH/s 102.94 TH/s  13 / 0 / 0 |
+    # | -  2 GPU         148.50 TH/s 181.93 TH/s  23 / 0 / 0 |
+    # Prefer the newest aggregate "- N GPU" row. This keeps the dashboard
+    # hashrate/pool rate aligned with the total power draw when mining on
+    # multiple GPUs. Fall back to GPU0 during early startup or older miner output.
+    total_row_re = re.compile(
+        r"\|\s*-\s+\d+\s+GPU\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
+        r"\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
+        r"\s+(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*\|",
+        re.I,
+    )
     gpu_row_re = re.compile(
         r"\|\s*0\s+.+?\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
         r"\s+([0-9]+(?:\.[0-9]+)?)\s*(TH/s|GH/s|MH/s|kH/s|H/s)"
@@ -190,7 +199,7 @@ def _parse_miner_log(text):
         re.I,
     )
     for line in reversed(lines):
-        m = gpu_row_re.search(line)
+        m = total_row_re.search(line)
         if m:
             rate = float(m.group(1))
             rate_unit = m.group(2)
@@ -200,6 +209,19 @@ def _parse_miner_log(text):
             stale = int(m.group(6))
             rejected = int(m.group(7))
             break
+
+    if rate is None:
+        for line in reversed(lines):
+            m = gpu_row_re.search(line)
+            if m:
+                rate = float(m.group(1))
+                rate_unit = m.group(2)
+                pool_rate = float(m.group(3))
+                pool_rate_unit = m.group(4)
+                accepted = int(m.group(5))
+                stale = int(m.group(6))
+                rejected = int(m.group(7))
+                break
 
     # Session Stats gives stable averages and latency; use the newest values.
     for line in reversed(lines):
@@ -619,9 +641,11 @@ def _profitability(parsed, gpus, cfg):
     miner_hs = _to_hs(parsed.get("avg_1m") or parsed.get("hashrate"), parsed.get("hashrate_unit") or "TH/s")
     power_w = sum(float(g.get("power_w") or 0) for g in gpus)
     eff = None
-    if power_w > 0 and parsed.get("hashrate") is not None:
-        # Keep display unit aligned with the miner TUI (TH/s for Pearl today).
-        eff = float(parsed["hashrate"]) / power_w
+    display_hashrate = parsed.get("avg_1m") or parsed.get("hashrate")
+    if power_w > 0 and display_hashrate is not None:
+        # Use the same aggregate miner rate as profitability and divide by
+        # aggregate GPU power. This avoids showing half efficiency on 2+ GPUs.
+        eff = float(display_hashrate) / power_w
 
     prl_day = None
     net_hs = live.get("network_hashrate_hs")
