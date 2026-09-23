@@ -1,0 +1,30 @@
+#cloud-config
+autoinstall:
+  version: 1
+  interactive-sections:
+    - network
+    - storage
+    - identity
+  ssh:
+    install-server: true
+    allow-pw: true
+  packages:
+    - openssh-server
+    - git
+    - curl
+    - ca-certificates
+    - python3
+    - python3-venv
+    - python3-pip
+    - pciutils
+    - jq
+    - sudo
+    - ubuntu-drivers-common
+    - docker.io
+    - docker-compose-v2
+  late-commands:
+    - curtin in-target --target=/target -- mkdir -p /opt/ai6-installer
+    - cp /cdrom/ai6/firstboot.sh /target/opt/ai6-installer/firstboot.sh
+    - cp /cdrom/ai6/ai6-firstboot.service /target/etc/systemd/system/ai6-firstboot.service
+    - curtin in-target --target=/target -- chmod 0755 /opt/ai6-installer/firstboot.sh
+    - curtin in-target --target=/target -- systemctl enable ai6-firstboot.service
