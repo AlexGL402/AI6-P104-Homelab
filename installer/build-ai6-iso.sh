@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -Eeo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALLER_DIR="$ROOT_DIR/installer"
