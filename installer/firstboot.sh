@@ -43,7 +43,7 @@ fi
 nvidia-smi --query-gpu=index,name,memory.total,pci.bus_id --format=csv,noheader || true
 
 REPO="$TARGET_HOME/AI6-P104-Homelab"
-BRANCH="feature/cmp-tune-web"
+BRANCH="feature/ai6-installer"
 
 if [[ ! -d "$REPO/.git" ]]; then
   sudo -u "$TARGET_USER" git clone --branch "$BRANCH" --single-branch https://github.com/AlexGL402/AI6-P104-Homelab.git "$REPO"
@@ -112,14 +112,38 @@ if ! curl -fsS http://127.0.0.1:8090/health >/dev/null; then
   exit 1
 fi
 
+# Start repo-managed Open WebUI + Open Terminal stack.
+DEPLOY_DIR="$REPO/deploy"
+ENV_FILE="$DEPLOY_DIR/.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  WEBUI_SECRET_KEY="$(openssl rand -hex 32)"
+  OPEN_TERMINAL_API_KEY="$(openssl rand -hex 32)"
+  cat >"$ENV_FILE" <<EOF
+WEBUI_SECRET_KEY=$WEBUI_SECRET_KEY
+OPEN_TERMINAL_API_KEY=$OPEN_TERMINAL_API_KEY
+EOF
+  chown "$TARGET_USER:$TARGET_USER" "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+
+(
+  cd "$DEPLOY_DIR"
+  docker compose up -d
+)
+
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [[ -z "$LAN_IP" ]]; then LAN_IP=HOST_IP; fi
 
 echo "========================================="
 echo " AI6 READY"
-echo " Monitor: http://$LAN_IP:8090"
-echo " SSH:     ssh $TARGET_USER@$LAN_IP"
+echo " Monitor:       http://$LAN_IP:8090"
+echo " Open WebUI:    http://$LAN_IP:3000"
+echo " Open Terminal: http://$LAN_IP:8000"
+echo " SSH:           ssh $TARGET_USER@$LAN_IP"
 echo "========================================="
 
 touch "$STATE_DIR/complete"
-systemctl disable ai6-firstboot.service
+if systemctl cat ai6-firstboot.service >/dev/null 2>&1; then
+  systemctl disable ai6-firstboot.service
+fi
