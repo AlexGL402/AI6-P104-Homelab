@@ -23,10 +23,19 @@ STATE_DIR=/var/lib/ai6-installer
 mkdir -p "$STATE_DIR"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "Installing recommended NVIDIA compute driver..."
+  if lspci -nn 2>/dev/null | grep -qiE 'NVIDIA.*CMP|3D controller.*10de:1e09'; then
+    echo "CMP GPU detected."
+    echo "Refusing Ubuntu auto-driver selection: AI6 CMP baseline is NVIDIA 610.43.03 with MIT/GPL Open Kernel Modules."
+    echo "Install the pinned 610.43.03 driver using installer/README_RU.md, reboot, then rerun this script."
+    exit 20
+  fi
+
+  echo "No CMP GPU detected; installing recommended Ubuntu NVIDIA compute driver..."
   ubuntu-drivers install --gpgpu || ubuntu-drivers install || true
   touch "$STATE_DIR/driver-installed"
-  systemctl enable ai6-firstboot.service
+  if systemctl cat ai6-firstboot.service >/dev/null 2>&1; then
+    systemctl enable ai6-firstboot.service
+  fi
   systemctl reboot
   exit 0
 fi
