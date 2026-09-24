@@ -112,7 +112,57 @@ if ! curl -fsS http://127.0.0.1:8090/health >/dev/null; then
   exit 1
 fi
 
-# Start repo-managed Open WebUI + Open Terminal stack.
+# Install the standalone AI6 Web Terminal (ttyd) used by the Monitor buttons.
+apt-get install -y ttyd
+WEBTERM_ENV=/etc/ai6-web-terminal.env
+WEBTERM_SERVICE=/etc/systemd/system/ai6-web-terminal.service
+WEBTERM_PORT=8091
+
+if [[ -f "$WEBTERM_ENV" ]]; then
+  # Preserve existing credentials on reruns.
+  WEBTERM_PASSWORD="$(sed -n 's/^AI6_WEBTERM_PASSWORD=//p' "$WEBTERM_ENV" | head -n1)"
+fi
+if [[ -z "${WEBTERM_PASSWORD:-}" ]]; then
+  WEBTERM_PASSWORD="$(openssl rand -hex 12)"
+fi
+
+umask 077
+cat >"$WEBTERM_ENV" <<EOF
+AI6_WEBTERM_USER=$TARGET_USER
+AI6_WEBTERM_PASSWORD=$WEBTERM_PASSWORD
+AI6_WEBTERM_PORT=$WEBTERM_PORT
+EOF
+chmod 600 "$WEBTERM_ENV"
+umask 022
+
+cat >"$WEBTERM_SERVICE" <<EOF
+[Unit]
+Description=AI6 Web Terminal (ttyd)
+After=network.target
+
+[Service]
+Type=simple
+User=$TARGET_USER
+WorkingDirectory=$TARGET_HOME
+EnvironmentFile=$WEBTERM_ENV
+ExecStart=/usr/bin/ttyd --interface 0.0.0.0 --port ${AI6_WEBTERM_PORT} --writable --credential ${AI6_WEBTERM_USER}:${AI6_WEBTERM_PASSWORD} /bin/bash -l
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now ai6-web-terminal.service
+sleep 1
+if ! systemctl is-active --quiet ai6-web-terminal.service; then
+  echo "AI6 Web Terminal failed to start"
+  systemctl status ai6-web-terminal.service --no-pager || true
+  exit 1
+fi
+
+# Start repo-managed Open WebUI + Open Terminal API stack.
 DEPLOY_DIR="$REPO/deploy"
 ENV_FILE="$DEPLOY_DIR/.env"
 
@@ -137,10 +187,13 @@ if [[ -z "$LAN_IP" ]]; then LAN_IP=HOST_IP; fi
 
 echo "========================================="
 echo " AI6 READY"
-echo " Monitor:       http://$LAN_IP:8090"
-echo " Open WebUI:    http://$LAN_IP:3000"
-echo " Open Terminal: http://$LAN_IP:8000"
-echo " SSH:           ssh $TARGET_USER@$LAN_IP"
+echo " Monitor:          http://$LAN_IP:8090"
+echo " Web Terminal:     http://$LAN_IP:8091"
+echo " Open WebUI:       http://$LAN_IP:3000"
+echo " Open Terminal API:http://$LAN_IP:8000"
+echo " SSH:              ssh $TARGET_USER@$LAN_IP"
+echo " WebTerm user:     $TARGET_USER"
+echo " WebTerm password: $WEBTERM_PASSWORD"
 echo "========================================="
 
 touch "$STATE_DIR/complete"
