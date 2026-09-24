@@ -16,6 +16,9 @@
 - для не-CMP хоста сохраняется установка рекомендованного Ubuntu NVIDIA compute driver;
 - после появления `nvidia-smi` клонирует ветку `feature/cmp-tune-web`;
 - ставит AI6 Host Monitor на порт `8090`;
+- автоматически поднимает Docker-стек Open WebUI на `3000` и Open Terminal на `8000`;
+- создаёт локальные секреты `WEBUI_SECRET_KEY` и `OPEN_TERMINAL_API_KEY` в `deploy/.env`, если файла ещё нет;
+- сохраняет данные Open WebUI и Open Terminal в Docker named volumes, чтобы конфигурация переживала restart/reboot;
 - ставит ограниченные helper-команды для GPU power limit и reboot/poweroff;
 - если `cmp-tune` уже установлен, подключает CMP Tune control.
 
@@ -91,11 +94,15 @@ cd ~/AI6-P104-Homelab
 sudo bash installer/firstboot.sh
 ```
 
-9. После этого открыть:
+9. После этого доступны:
 
 ```text
-http://IP_МАШИНЫ:8090
+AI6 Monitor:   http://IP_МАШИНЫ:8090
+Open WebUI:    http://IP_МАШИНЫ:3000
+Open Terminal: http://IP_МАШИНЫ:8000
 ```
+
+Open WebUI использует конфигурацию из `deploy/docker-compose.yml` и постоянный Docker volume `open-webui`. Репозиторий также содержит AI6 helper-функции в `openwebui/functions/`. Аккаунты и база конкретной старой установки Open WebUI в Git не хранятся; для их полного клонирования нужен отдельный backup Docker volume/DB.
 
 Проверка по SSH:
 
