@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 APP_TITLE = "AI6 Host Monitor"
 CSV_PATH = Path(os.environ.get("AI6_MONITOR_CSV", "/var/lib/ai6-monitor/psu-test.csv"))
 
-app = FastAPI(title=APP_TITLE, version="1.5.0")
+app = FastAPI(title=APP_TITLE, version="1.6.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,40 +45,79 @@ def _int(v):
 
 
 def gpu_stats():
-    fields = [
+    base_fields = [
         "index", "name", "temperature.gpu", "utilization.gpu",
         "memory.used", "memory.total", "power.draw", "power.limit",
         "fan.speed", "clocks.current.graphics", "clocks.current.memory",
     ]
-    cmd = [
-        "nvidia-smi", f"--query-gpu={','.join(fields)}",
-        "--format=csv,noheader,nounits",
+    extra_fields = [
+        "utilization.memory", "pcie.link.gen.current", "pcie.link.width.current", "pstate",
+        "clocks_event_reasons.gpu_idle", "clocks_event_reasons.sw_power_cap",
+        "clocks_event_reasons.hw_slowdown", "clocks_event_reasons.hw_thermal_slowdown",
+        "clocks_event_reasons.hw_power_brake_slowdown", "clocks_event_reasons.sw_thermal_slowdown",
     ]
+
+    def query(fields):
+        cmd = [
+            "nvidia-smi", f"--query-gpu={','.join(fields)}",
+            "--format=csv,noheader,nounits",
+        ]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
+
+    fields = base_fields + extra_fields
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=True)
+        p = query(fields)
     except FileNotFoundError:
         raise RuntimeError("nvidia-smi not found on host")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(e.stderr.strip() or "nvidia-smi failed")
+    except subprocess.CalledProcessError:
+        fields = base_fields
+        try:
+            p = query(fields)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(e.stderr.strip() or "nvidia-smi failed")
 
     gpus = []
     for line in p.stdout.strip().splitlines():
         cols = [x.strip() for x in line.split(",")]
         if len(cols) != len(fields):
             continue
-        fan = _float(cols[8])
+        row = dict(zip(fields, cols))
+        fan = _float(row.get("fan.speed"))
         if fan is not None and not (0 <= fan <= 100):
             fan = None
+
+        reasons = []
+        reason_labels = (
+            ("clocks_event_reasons.sw_power_cap", "Power cap"),
+            ("clocks_event_reasons.hw_thermal_slowdown", "HW thermal"),
+            ("clocks_event_reasons.hw_power_brake_slowdown", "Power brake"),
+            ("clocks_event_reasons.sw_thermal_slowdown", "SW thermal"),
+            ("clocks_event_reasons.hw_slowdown", "HW slowdown"),
+        )
+        for key, label in reason_labels:
+            if str(row.get(key, "")).strip().lower() == "active" and label not in reasons:
+                reasons.append(label)
+        if not reasons and str(row.get("clocks_event_reasons.gpu_idle", "")).strip().lower() == "active":
+            reasons.append("Idle")
+
         gpus.append({
-            "index": _int(cols[0]), "name": cols[1],
-            "temperature_c": _float(cols[2]), "utilization_pct": _float(cols[3]),
-            "memory_used_mib": _float(cols[4]), "memory_total_mib": _float(cols[5]),
-            "power_w": _float(cols[6]), "power_limit_w": _float(cols[7]),
-            "fan_pct": fan, "graphics_clock_mhz": _float(cols[9]),
-            "memory_clock_mhz": _float(cols[10]),
+            "index": _int(row.get("index")), "name": row.get("name"),
+            "temperature_c": _float(row.get("temperature.gpu")),
+            "utilization_pct": _float(row.get("utilization.gpu")),
+            "memory_utilization_pct": _float(row.get("utilization.memory")),
+            "memory_used_mib": _float(row.get("memory.used")),
+            "memory_total_mib": _float(row.get("memory.total")),
+            "power_w": _float(row.get("power.draw")),
+            "power_limit_w": _float(row.get("power.limit")),
+            "fan_pct": fan,
+            "graphics_clock_mhz": _float(row.get("clocks.current.graphics")),
+            "memory_clock_mhz": _float(row.get("clocks.current.memory")),
+            "pcie_gen": _int(row.get("pcie.link.gen.current")),
+            "pcie_width": _int(row.get("pcie.link.width.current")),
+            "pstate": row.get("pstate") if row.get("pstate") not in (None, "N/A") else None,
+            "clock_limit_reasons": reasons,
         })
     return gpus
-
 
 def cpu_temperature():
     try:
@@ -91,6 +130,84 @@ def cpu_temperature():
             if t.current is not None and -20 < t.current < 150:
                 values.append(float(t.current))
     return max(values) if values else None
+
+
+def _parse_cpu_list(value: str):
+    out = []
+    for part in (value or "").strip().split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def _numa_nodes():
+    nodes = {}
+    base = Path("/sys/devices/system/node")
+    if not base.exists():
+        return nodes
+    for node_path in sorted(base.glob("node[0-9]*")):
+        try:
+            node_id = int(node_path.name[4:])
+            cpus = set(_parse_cpu_list((node_path / "cpulist").read_text().strip()))
+            total_kb = free_kb = None
+            for line in (node_path / "meminfo").read_text().splitlines():
+                m = re.search(r"MemTotal:\\s+(\\d+)\\s+kB", line)
+                if m:
+                    total_kb = int(m.group(1))
+                m = re.search(r"MemFree:\\s+(\\d+)\\s+kB", line)
+                if m:
+                    free_kb = int(m.group(1))
+            nodes[node_id] = {
+                "cpus": cpus,
+                "memory_total_bytes": total_kb * 1024 if total_kb is not None else None,
+                "memory_free_bytes": free_kb * 1024 if free_kb is not None else None,
+            }
+        except Exception:
+            continue
+    return nodes
+
+
+def cpu_socket_stats(per_cpu_usage=None):
+    logical = psutil.cpu_count(logical=True) or 0
+    per_cpu_usage = per_cpu_usage or [0.0] * logical
+    freqs = psutil.cpu_freq(percpu=True) or []
+    packages = {}
+    for cpu_id in range(logical):
+        try:
+            package_id = int(Path(
+                f"/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id"
+            ).read_text().strip())
+        except Exception:
+            package_id = 0
+        packages.setdefault(package_id, []).append(cpu_id)
+
+    numa = _numa_nodes()
+    sockets = []
+    for package_id, cpu_ids in sorted(packages.items()):
+        loads = [per_cpu_usage[i] for i in cpu_ids if i < len(per_cpu_usage)]
+        mhz = [freqs[i].current for i in cpu_ids if i < len(freqs) and freqs[i].current]
+        node_id = None
+        best_overlap = 0
+        for nid, info in numa.items():
+            overlap = len(set(cpu_ids) & info["cpus"])
+            if overlap > best_overlap:
+                node_id, best_overlap = nid, overlap
+        node = numa.get(node_id, {}) if node_id is not None else {}
+        sockets.append({
+            "socket": package_id,
+            "logical_cpus": len(cpu_ids),
+            "usage_pct": round(sum(loads) / len(loads), 1) if loads else None,
+            "frequency_mhz": round(sum(mhz) / len(mhz), 0) if mhz else None,
+            "numa_node": node_id,
+            "memory_total_bytes": node.get("memory_total_bytes"),
+            "memory_free_bytes": node.get("memory_free_bytes"),
+        })
+    return sockets
 
 
 def service_ok(port: int):
@@ -244,6 +361,9 @@ def collect_stats():
     vm = psutil.virtual_memory()
     root = psutil.disk_usage("/")
     net = psutil.net_io_counters()
+    per_cpu_usage = psutil.cpu_percent(interval=0.15, percpu=True)
+    sockets = cpu_socket_stats(per_cpu_usage)
+    cpu_usage = round(sum(per_cpu_usage) / len(per_cpu_usage), 1) if per_cpu_usage else 0.0
     gpus = gpu_stats()
     powers = [g["power_w"] for g in gpus if g["power_w"] is not None]
     temps = [g["temperature_c"] for g in gpus if g["temperature_c"] is not None]
@@ -256,12 +376,14 @@ def collect_stats():
             "uptime_s": int(datetime.now().timestamp() - psutil.boot_time()), "lan_ip": lan_ip(),
         },
         "cpu": {
-            "usage_pct": psutil.cpu_percent(interval=0.15),
+            "usage_pct": cpu_usage,
             "load_1m": os.getloadavg()[0] if hasattr(os, "getloadavg") else None,
             "load_5m": os.getloadavg()[1] if hasattr(os, "getloadavg") else None,
             "load_15m": os.getloadavg()[2] if hasattr(os, "getloadavg") else None,
             "logical_cpus": psutil.cpu_count(logical=True),
             "physical_cpus": psutil.cpu_count(logical=False),
+            "socket_count": len(sockets),
+            "sockets": sockets,
             "temperature_c": cpu_temperature(),
         },
         "memory": {"used_bytes": vm.used, "total_bytes": vm.total, "available_bytes": vm.available, "usage_pct": vm.percent},
@@ -381,7 +503,7 @@ DASHBOARD = r'''<!doctype html>
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:12px;margin-top:16px;align-items:stretch}.summary-card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;min-height:92px;display:flex;flex-direction:column;justify-content:flex-start}.summary-card .label{font-size:13px}.big{font-size:28px;font-weight:700;line-height:1.15;margin-top:4px}.summary-sub{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.3}
 .section{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:16px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}.section-title{font-size:17px;font-weight:750}.section-sub{font-size:12px;color:var(--muted);margin-top:2px}.profile-actions{display:flex;gap:6px}.profile-actions button{padding:6px 10px;font-size:12px}
 .worker-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;align-items:stretch}.worker-card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:11px;min-height:158px;display:flex;flex-direction:column}.worker-card.test{border-style:dashed}.worker-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.worker-port{font-weight:800;font-size:14px}.status{font-weight:700;font-size:12px}.ready{color:var(--ok)}.loading,.starting{color:var(--warn)}.down,.error{color:var(--bad)}.worker-model{font-size:13px;font-weight:750;margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.worker-meta{font-size:12px;color:var(--muted);line-height:1.45;margin-top:5px}.worker-stats{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:8px;font-size:11px}.worker-stat{background:#202020;border:1px solid #2d2d2d;border-radius:7px;padding:5px 7px}.worker-stat b{display:block;color:#ddd;font-size:12px}.worker-actions{display:flex;gap:5px;margin-top:auto;padding-top:10px}.worker-actions button{padding:5px 8px;font-size:11px}.test-note{margin-top:auto;padding-top:10px;font-size:11px;color:var(--muted)}
-.gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid var(--border);padding:9px 0}.gpu:first-child{border-top:0}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:var(--text)}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}
+.cpu-socket-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.cpu-socket{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:11px}.cpu-socket-head{display:flex;justify-content:space-between;gap:8px;font-weight:750}.cpu-socket-meta{font-size:12px;color:var(--muted);line-height:1.5;margin-top:6px}.gpu{display:grid;grid-template-columns:42px 1fr;gap:8px;border-top:1px solid var(--border);padding:9px 0}.gpu:first-child{border-top:0}.gpu table td:nth-child(odd){color:var(--muted);width:16%}.gpu-reasons{font-size:11px;color:var(--muted);margin-top:6px}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}input,button{font:inherit;padding:8px;border-radius:8px;border:1px solid #555;background:#222;color:var(--text)}button{cursor:pointer}.bar{height:8px;background:#333;border-radius:5px;overflow:hidden;margin-top:5px}.fill{height:100%;background:#aaa;width:0%}table{width:100%;border-collapse:collapse}td{padding:4px 2px;border-bottom:1px solid #2d2d2d}
 .host-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}.host-controls .host-label{font-weight:750;margin-right:4px}.host-btn{padding:7px 11px}.host-btn.reboot{border-color:#8a6d2c}.host-btn.poweroff{border-color:#8a3535;color:#ffb0b0}.host-hint{font-size:11px;color:var(--muted)}
 @media(max-width:700px){body{margin:10px}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.summary-card{min-height:88px;padding:11px}.big{font-size:24px}.worker-grid{grid-template-columns:1fr}}
 </style></head><body>
@@ -396,6 +518,11 @@ DASHBOARD = r'''<!doctype html>
  <div class="summary-card"><div class="label">System</div><div class="big" id="uptime">-</div><div id="system2" class="summary-sub"></div></div>
  <div class="summary-card"><div class="label">GPU VRAM</div><div class="big" id="vramtotal">-</div><div id="vramtotal2" class="summary-sub"></div></div>
  <div class="summary-card"><div class="label">LLM</div><div class="big" id="workers">-</div><div id="profile" class="summary-sub">profile -</div></div>
+</div>
+
+<div class="section">
+ <div class="section-head"><div><div class="section-title">CPU sockets</div><div class="section-sub">Per-socket load, average clock and NUMA memory</div></div></div>
+ <div id="cpusockets" class="cpu-socket-grid"></div>
 </div>
 
 <div class="section">
@@ -432,7 +559,8 @@ function testWorkerCard(w){
 async function refresh(){
  try{const r=await fetch('/api/stats');const s=await r.json();if(!r.ok)throw new Error(JSON.stringify(s));
  stamp.textContent=s.host.hostname+' • '+new Date(s.timestamp).toLocaleString();
- cpu.textContent=s.cpu.usage_pct.toFixed(1)+'%';cpu2.textContent='load '+s.cpu.load_1m.toFixed(2)+' / '+s.cpu.load_5m.toFixed(2)+' / '+s.cpu.load_15m.toFixed(2)+(s.cpu.temperature_c!=null?' • '+s.cpu.temperature_c.toFixed(0)+'°C':'');
+ cpu.textContent=s.cpu.usage_pct.toFixed(1)+'%';cpu2.textContent='load '+s.cpu.load_1m.toFixed(2)+' / '+s.cpu.load_5m.toFixed(2)+' / '+s.cpu.load_15m.toFixed(2)+' • '+(s.cpu.socket_count||1)+' socket'+((s.cpu.socket_count||1)===1?'':'s')+(s.cpu.temperature_c!=null?' • '+s.cpu.temperature_c.toFixed(0)+'°C':'');
+ const sock=s.cpu.sockets||[];cpusockets.innerHTML=sock.map(x=>{const mt=x.memory_total_bytes!=null?gib(x.memory_total_bytes):'?';const mf=x.memory_free_bytes!=null?gib(x.memory_free_bytes):'?';const mu=(x.memory_total_bytes!=null&&x.memory_free_bytes!=null)?gib(x.memory_total_bytes-x.memory_free_bytes):'?';return '<div class="cpu-socket"><div class="cpu-socket-head"><span>Socket '+x.socket+'</span><span>'+(x.usage_pct==null?'?':x.usage_pct.toFixed(1))+'%</span></div><div class="cpu-socket-meta">'+x.logical_cpus+' threads • '+(x.frequency_mhz==null?'?':Math.round(x.frequency_mhz)+' MHz')+'<br>NUMA '+(x.numa_node==null?'?':x.numa_node)+' • RAM '+mu+' used / '+mt+' total • '+mf+' free</div><div class="bar"><div class="fill" style="width:'+Math.min(100,x.usage_pct||0)+'%"></div></div></div>'}).join('');
  ram.textContent=s.memory.usage_pct.toFixed(1)+'%';ram2.textContent=(s.memory.used_bytes/1073741824).toFixed(2)+' / '+(s.memory.total_bytes/1073741824).toFixed(2)+' GiB';
  power.textContent=s.gpu.power_total_w.toFixed(1)+' W';gputemp.innerHTML='max temp <span class="'+cls(s.gpu.temperature_max_c)+'">'+(s.gpu.temperature_max_c??'?')+'°C</span>';
  disk.textContent=s.disk.usage_pct.toFixed(1)+'%';disk2.textContent=gib(s.disk.used_bytes)+' used • '+gib(s.disk.free_bytes)+' free / '+gib(s.disk.total_bytes);
@@ -444,7 +572,7 @@ async function refresh(){
  workers.innerHTML='<span class="ready">'+readyCount+'</span>/<span class="loading">'+loadingCount+'</span>/<span class="down">'+downCount+'</span>';
  profile.innerHTML=(s.llama.profile==='222'?'2+2+2':'3+3')+' • '+profileModel(s.llama.profile)+(tw.state==='ready'?' • TEST ready':tw.state==='loading'?' • TEST loading':'');
  workerbuttons.innerHTML=ports.map(p=>regularWorkerCard(p,ws[String(p)]||{},s.llama.profile)).join('')+testWorkerCard(tw);
- gpus.innerHTML=s.gpu.devices.map(g=>`<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct==null?'N/A':g.fan_pct+'%'}</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div></div></div>`).join('');
+ gpus.innerHTML=s.gpu.devices.map(g=>{const reasons=(g.clock_limit_reasons||[]).join(', ')||'None';const pcie=(g.pcie_gen!=null&&g.pcie_width!=null)?('Gen'+g.pcie_gen+' x'+g.pcie_width):'?';return `<div class="gpu"><b>#${g.index}</b><div><div>${g.name}</div><table><tr><td>Load</td><td>${g.utilization_pct??'?'}%</td><td>Temp</td><td class="${cls(g.temperature_c)}">${g.temperature_c??'?'}°C</td></tr><tr><td>Power</td><td>${g.power_w??'?'} W</td><td>Limit</td><td>${g.power_limit_w??'?'} W</td></tr><tr><td>VRAM</td><td>${mib(g.memory_used_mib)} / ${mib(g.memory_total_mib)}</td><td>Fan</td><td>${g.fan_pct==null?'N/A':g.fan_pct+'%'}</td></tr><tr><td>Mem util</td><td>${g.memory_utilization_pct==null?'?':g.memory_utilization_pct+'%'}</td><td>PCIe</td><td>${pcie}</td></tr><tr><td>Core</td><td>${g.graphics_clock_mhz==null?'?':g.graphics_clock_mhz+' MHz'}</td><td>Memory</td><td>${g.memory_clock_mhz==null?'?':g.memory_clock_mhz+' MHz'}</td></tr><tr><td>P-state</td><td>${g.pstate||'?'}</td><td>Limiter</td><td>${reasons}</td></tr></table><div class="bar"><div class="fill" style="width:${Math.min(100,g.utilization_pct||0)}%"></div></div><div class="gpu-reasons">Clock limiter: ${reasons}</div></div></div>`}).join('');
  }catch(e){stamp.textContent='ERROR: '+e.message}
 }
 async function saveSample(){const v=parseFloat(v12.value);if(!Number.isFinite(v))return;saved.textContent='saving...';const r=await fetch('/api/psu-sample',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voltage_12v:v,note:note.value})});const x=await r.json();saved.textContent=r.ok?'saved: '+x.sample.gpu_power_total_w+' W @ '+x.sample.voltage_12v+' V':'error: '+JSON.stringify(x)}
