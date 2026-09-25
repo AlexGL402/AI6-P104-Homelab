@@ -123,6 +123,15 @@ Qwen 30B   Qwen 30B
 
 All GPUs negotiate PCIe x1 on this mining motherboard and CUDA P2P is unavailable between cards. Tensor-parallel scaling therefore becomes worse as more GPUs participate in a single request. Splitting the machine into multiple independent workers is the practical workaround.
 
+## Optional mining test module
+
+This repository is an **AI/LLM homelab**. Mining support is kept only as an optional GPU test/benchmark module and is **disabled by default**.
+
+- ForgeMiner is never started automatically by the repository.
+- Miner API routes and the Miner dashboard tab are not loaded unless explicitly enabled.
+- To enable the optional module for a test session, set `AI6_ENABLE_MINER=1` in the `ai6-monitor` service environment and restart the monitor.
+- Leave the variable unset (or set it to `0`) for normal AI/LLM operation.
+
 ## Repository layout
 
 ```text
