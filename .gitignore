@@ -3,3 +3,9 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Local miner/runtime state — never commit wallets, local config, logs or PIDs
+**/miner-config.json
+**/forge-miner.log
+**/forge-miner.pid
+**/.local/state/ai6-monitor/
