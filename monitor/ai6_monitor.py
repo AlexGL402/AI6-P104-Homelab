@@ -156,10 +156,10 @@ def _numa_nodes():
             cpus = set(_parse_cpu_list((node_path / "cpulist").read_text().strip()))
             total_kb = free_kb = None
             for line in (node_path / "meminfo").read_text().splitlines():
-                m = re.search(r"MemTotal:\\s+(\\d+)\\s+kB", line)
+                m = re.search(r"MemTotal:\s+(\d+)\s+kB", line)
                 if m:
                     total_kb = int(m.group(1))
-                m = re.search(r"MemFree:\\s+(\\d+)\\s+kB", line)
+                m = re.search(r"MemFree:\s+(\d+)\s+kB", line)
                 if m:
                     free_kb = int(m.group(1))
             nodes[node_id] = {
