@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """Entry point for the auto-discovery AI6 monitor."""
 
+import os
+
 import ai6_monitor_dynamic as dynamic
 import ai6_vllm
-import ai6_miner
 import ai6_insights
 
-# Add the dedicated vLLM, miner and insights tabs/APIs on top of the dynamic monitor.
+# Mining support is intentionally opt-in. Keeping ForgeMiner installed on disk or
+# in the repository does not expose miner routes/UI or start mining by default.
+_ENABLE_MINER = os.environ.get("AI6_ENABLE_MINER", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+if _ENABLE_MINER:
+    import ai6_miner
+
+# Add the dedicated optional tabs/APIs on top of the dynamic monitor.
 ai6_vllm.install()
-ai6_miner.install()
+if _ENABLE_MINER:
+    ai6_miner.install()
 ai6_insights.install()
 
 # Finalize all top-level tabs in one place. This avoids nested-pane/layout
