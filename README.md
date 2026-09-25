@@ -125,7 +125,7 @@ All GPUs negotiate PCIe x1 on this mining motherboard and CUDA P2P is unavailabl
 
 ## Optional mining test module
 
-This repository is an **AI/LLM homelab**. Mining support is kept only as an optional GPU test/benchmark module and is **disabled by default**.
+This repository is an **AI/LLM homelab**. Mining support is kept only as an optional GPU test/benchmark module for **short-term GPU stability testing and comparing card characteristics/performance** and is **disabled by default**.
 
 - ForgeMiner is never started automatically by the repository.
 - Miner API routes and the Miner dashboard tab are not loaded unless explicitly enabled.
