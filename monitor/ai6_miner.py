@@ -29,7 +29,7 @@ _MINER_LOG = Path(os.environ.get("AI6_MINER_LOG", str(_STATE_DIR / "forge-miner.
 _MINER_PID = Path(os.environ.get("AI6_MINER_PID", str(_STATE_DIR / "forge-miner.pid")))
 _CMP_TUNE_STATE = Path(os.environ.get("AI6_CMP_TUNE_STATE", str(_STATE_DIR / "cmp-tune-state.json")))
 _CMP_TUNE_BIN = os.environ.get("AI6_CMP_TUNE_BIN", "/usr/local/sbin/cmp-tune")
-_CMP_TUNE_CTL = os.environ.get("AI6_CMP_TUNE_CTL", "/usr/local/sbin/ai6-cmptune")
+_CMP_TUNE_CTL = os.environ.get("AI6_CMP_TUNE_CTL", "/usr/local/sbin/ai6-cmptune")\n_MINER_CTL = os.environ.get("AI6_MINER_CTL", "/usr/local/sbin/ai6-minerctl")
 _MARKET_CACHE = {"ts": 0.0, "data": {}}
 _KRYPTEX_CACHE = {"ts": 0.0, "wallet": "", "data": {}}
 _MARKET_HISTORY = Path(os.environ.get("AI6_MARKET_HISTORY", str(_STATE_DIR / "prl-market-history.json")))
@@ -203,6 +203,25 @@ def _miner_proc():
         except Exception:
             continue
     return None
+
+
+def _miner_service_installed():
+    return Path(_MINER_CTL).is_file() and os.access(_MINER_CTL, os.X_OK)
+
+
+def _miner_service_action(action, timeout=20.0):
+    if action not in ("start", "stop", "restart", "status"):
+        return 2, "", "invalid miner service action"
+    try:
+        p = subprocess.run(
+            ["sudo", "-n", _MINER_CTL, action],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except Exception as e:
+        return 1, "", str(e)
 
 
 def _vllm_busy():
@@ -1056,6 +1075,25 @@ def api_miner_control(cmd: MinerActionCommand):
             except ValueError as e:
                 raise base.HTTPException(status_code=400, detail=f"Invalid extra args: {e}")
 
+        # Preferred path: launch ForgeMiner as its own systemd service.
+        # This keeps mining alive when ai6-monitor itself is restarted.
+        if _miner_service_installed():
+            rc, out, err = _miner_service_action("start")
+            if rc != 0:
+                raise base.HTTPException(
+                    status_code=500,
+                    detail=(err or out or "Failed to start ai6-miner.service").strip(),
+                )
+            # Give systemd/Forge a moment to exec, then report the detected PID.
+            for _ in range(20):
+                proc = _miner_proc()
+                if proc:
+                    return {"ok": True, "message": "Miner started via ai6-miner.service.", "pid": proc.pid}
+                time.sleep(0.1)
+            return {"ok": True, "message": "ai6-miner.service started; waiting for ForgeMiner process.", "pid": None}
+
+        # Backward-compatible fallback for hosts where the separate miner
+        # service has not yet been installed.
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
         logf = _MINER_LOG.open("ab", buffering=0)
         header = ("\n\n=== AI6 monitor start " + time.strftime("%Y-%m-%d %H:%M:%S %z") + " ===\n").encode()
@@ -1073,6 +1111,19 @@ def api_miner_control(cmd: MinerActionCommand):
         return {"ok": True, "message": "Miner started.", "pid": proc.pid}
 
     if action == "stop":
+        if _miner_service_installed():
+            rc, out, err = _miner_service_action("stop")
+            if rc != 0:
+                raise base.HTTPException(
+                    status_code=500,
+                    detail=(err or out or "Failed to stop ai6-miner.service").strip(),
+                )
+            try:
+                _MINER_PID.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return {"ok": True, "message": "Miner stopped via ai6-miner.service."}
+
         proc = _miner_proc()
         if not proc:
             try:
