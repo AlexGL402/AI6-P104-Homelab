@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SERVICE=ai6-miner.service
+SYSTEMCTL=/bin/systemctl
+
+case "${1:-}" in
+  start)
+    exec "$SYSTEMCTL" start "$SERVICE"
+    ;;
+  stop)
+    exec "$SYSTEMCTL" stop "$SERVICE"
+    ;;
+  restart)
+    exec "$SYSTEMCTL" restart "$SERVICE"
+    ;;
+  status)
+    exec "$SYSTEMCTL" --no-pager --full status "$SERVICE"
+    ;;
+  *)
+    echo "usage: ai6-minerctl {start|stop|restart|status}" >&2
+    exit 2
+    ;;
+esac
