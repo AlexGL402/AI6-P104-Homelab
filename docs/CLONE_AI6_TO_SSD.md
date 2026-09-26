@@ -309,3 +309,98 @@ ai6@BTCpro:~$
 ```
 
 На этой машине GRUB был окончательно восстановлен обычным UEFI `grub-install --recheck` уже после первой ручной загрузки.
+
+
+## BTCpro: рабочая конфигурация CMP 50HX (2026-09-26)
+
+Проверенная конфигурация BTCpro после переноса клона на ASRock H510 Pro BTC+:
+
+- Ubuntu 24.04.5 LTS, hostname `BTCpro`.
+- Рабочее ядро для CMP stack: `6.8.0-139-generic`.
+- NVIDIA KMD/UMD: `610.43.03`, CUDA UMD 13.3.
+- Две CMP 50HX 10 GB (`10de:1e09`).
+- GPU0 `0000:01:00.0`: PCIe **Gen2 x4** (5.0 GT/s x4).
+- GPU1 `0000:02:00.0`: PCIe **Gen2 x1** (5.0 GT/s x1).
+
+### Gen2 unlock
+
+На BTCpro используется patched module set из `cmp50hx-unlock`. Активный модуль:
+
+```text
+/lib/modules/6.8.0-139-generic/updates/forge-cmp/nvidia.ko
+```
+
+Он должен содержать параметр:
+
+```text
+cmp50_gen2_adopt
+```
+
+Конфигурация:
+
+```text
+/etc/modprobe.d/cmp50hx-gen2.conf:
+options nvidia cmp50_gen2_adopt=1
+```
+
+После изменения модулей/параметров:
+
+```bash
+sudo depmod -a 6.8.0-139-generic
+sudo update-initramfs -u -k 6.8.0-139-generic
+```
+
+Проверка:
+
+```bash
+cat /sys/module/nvidia/parameters/cmp50_gen2_adopt
+sudo dmesg | grep -Ei 'CMP50_GEN2|ADOPT_|RETRAIN'
+```
+
+На проверенном cold boot обе карты получили `ADOPT_PASS`. GPU0 автоматически завершил `RETRAIN_PASS` и поднялся в Gen2 x4. GPU1 получил Gen2 capability, но первая ранняя попытка retrain завершилась `RETRAIN_FAIL`; повторный retrain upstream-порта `0000:00:1c.0` успешно поднял его до Gen2 x1.
+
+Старый `cmp50hx-gen2.service` отключён:
+
+```bash
+sudo systemctl disable --now cmp50hx-gen2.service
+```
+
+Для поздней автодоводки линка установлен `cmp50hx-gen2-fixup.service`. Он ждёт после загрузки, пропускает карты уже на 5.0 GT/s или выше и делает стандартный PCIe retrain upstream-порта только для CMP 50HX, оставшейся на Gen1. Sysfs сообщает скорость как строку `5.0 GT/s PCIe`, поэтому проверка должна принимать шаблон `"5.0 GT/s"*`, а не только точное `"5.0 GT/s"`.
+
+Проверка итоговых линков:
+
+```bash
+for d in 01:00.0 02:00.0; do
+    echo "===== $d ====="
+    sudo lspci -vv -s "$d" | grep -E 'LnkCap:|LnkSta:'
+done
+```
+
+Рабочий результат:
+
+```text
+01:00.0: LnkCap Speed 5GT/s, LnkSta Speed 5GT/s Width x4
+02:00.0: LnkCap Speed 5GT/s, LnkSta Speed 5GT/s Width x1
+```
+
+### P-state / idle power
+
+CMP 50HX сама остаётся в P0 при 0% GPU load. На BTCpro наблюдалось около 60–64 W на карту в простое при памяти 7000 MHz и ядре около 2 GHz; power limit выставлен 170 W.
+
+В проекте `cmp50hx-unlock` для этого предусмотрен отдельный `cmp-idle-governor`. Не включать исследовательский `05-cmp50-auto-pstate.patch`: upstream проекта оставляет его вне сборки, потому что он может удерживать карту в P8 и под нагрузкой. Для idle используется governor, который принудительно запрашивает P8 при простое и освобождает состояние при появлении нагрузки.
+
+Установка уже присутствует в клоне; включение:
+
+```bash
+sudo systemctl enable --now cmp-idle-governor
+```
+
+Проверка:
+
+```bash
+systemctl status cmp-idle-governor --no-pager
+journalctl -u cmp-idle-governor -n 50 --no-pager
+nvidia-smi --query-gpu=index,pstate,clocks.gr,clocks.mem,power.draw,utilization.gpu --format=csv
+```
+
+Перед дальнейшими изменениями PCIe или NVIDIA stack сохранить текущую рабочую конфигурацию: Gen2 x4 + Gen2 x1 и рабочий `610.43.03` на ядре `6.8.0-139-generic`.
