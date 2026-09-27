@@ -2,7 +2,35 @@
 
 This file records the current operational conclusions derived from the saved benchmark series. Raw measurements remain in the dated benchmark files and per-run reports.
 
-## Current conclusions — 2026-09-21
+## Current conclusions — 2026-09-27
+
+### J1900 + P104 mini-node
+
+The J1900 mini platform is viable as an economical always-on local-AI node with one P104-100 8 GB.
+
+Current working software baseline:
+
+- NVIDIA proprietary driver 555.42.06
+- Ollama 0.24.0
+- CUDA backend detected as CUDA 12.5
+- Context 4096
+- Current PCIe link: Gen1 x1
+- BIOS Max TOLUD: 2 GB
+
+Recent Ollama 0.30.6 and 0.33.3 reject this Pascal / compute 6.1 GPU on driver 555 and request NVIDIA driver 570 or newer. Ollama 0.24.0 detects the P104 normally through the CUDA 12 backend.
+
+Saved single-GPU results:
+
+| Model | Prompt tok/s | Generation tok/s | Total time | Approx. VRAM |
+|---|---:|---:|---:|---:|
+| Qwen3 4B | 475.15 | 37.31 | 15.573 s | ~3.08 GiB |
+| Qwen3 8B | 294.21 | 26.92 | 20.957 s | ~5.3-5.45 GiB |
+
+Qwen3 8B is the current preferred primary mini-node model: it remains fully GPU-resident and still delivers ~26.9 tok/s decode. Qwen3 4B is the faster lightweight fallback.
+
+Because the current PCIe path is Gen1 x1, keep the primary model resident for long periods rather than repeatedly reloading it. A 24-hour Ollama keep-alive is recommended.
+
+See `benchmarks/2026-09-27-j1900-p104-mini.md` for the full BIOS, PCIe, driver, Ollama compatibility and benchmark notes.
 
 ### CMP 40HX — vLLM sweet spot
 
