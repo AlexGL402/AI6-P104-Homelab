@@ -51,7 +51,7 @@ This is much better for total throughput than using all six GPUs for one tensor-
 | llama.cpp tensor, clean stack | 4 | 57.8 | 29.1 | Stable |
 | llama.cpp tensor, clean stack | 6 | 51.6 | 27.2 | Negative scaling from PCIe x1 / no P2P |
 | llama.cpp tensor, clean stack | 2 | — | — | OOM |
-| Two parallel 3-GPU workers — H81A | 3+3 | — | **64.08 aggregate** | 32.22 + 31.86 tok/s |\n| Two parallel 3-GPU workers — BTCpro | 3+3 | — | **65.00 aggregate avg** | 3-run average; +1.43% vs H81A |
+| Two parallel 3-GPU workers — H81A | 3+3 | — | **64.08 aggregate** | 32.22 + 31.86 tok/s |\n| Two parallel 3-GPU workers — BTCpro | 3+3 | — | **65.11 aggregate avg** | 3-run average, thinking off; +1.60% vs H81A |
 | Qwen3-Coder-Next 80B.A3B via Ollama | 6 | 2.58 | 8.59 | Heavy quality mode |
 
 ## Agentic coding
