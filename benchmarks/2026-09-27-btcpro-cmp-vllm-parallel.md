@@ -191,6 +191,23 @@ During the 338 tok/s run, telemetry showed approximately:
 This is materially different from the heterogeneous CMP40 pipeline tests, where reported GPU load stayed near 100% but board power remained only around 60–80 W, consistent with waiting/stalls rather than dense compute.
 
 
+
+## Concurrency sweep — 2× CMP50HX, PP=2, Qwen3-14B-AWQ
+
+Fixed workload: 512 output tokens/request, temperature 0, thinking disabled, same coding prompt.
+
+| Concurrency | Output tokens | Wall time | Aggregate | Per request |
+|---:|---:|---:|---:|---:|
+| 12 (warm) | 6144 | 18.176 s | **338.02 tok/s** | 28.17 tok/s |
+| 24 | 12288 | 28.144 s | **436.61 tok/s** | 18.19 tok/s |
+| 32 | 16384 | 31.262 s | **524.08 tok/s** | 16.38 tok/s |
+| 48 | 24576 | 37.457 s | **656.11 tok/s** | 13.67 tok/s |
+| 64 | 32768 | 47.033 s | **696.70 tok/s** | 10.89 tok/s |
+| 96 | 49152 | 71.966 s | **682.99 tok/s** | 7.11 tok/s |
+
+The aggregate-throughput peak in this sweep is at concurrency 64: **696.70 tok/s**. Raising concurrency from 64 to 96 reduced aggregate throughput by about **2.0%** while per-request throughput fell from 10.89 to 7.11 tok/s. For this exact benchmark and host, concurrency 64 is therefore the measured throughput sweet spot; lower concurrency remains preferable when per-request latency matters.
+
+
 ## Practical conclusion
 
 For this BTCpro host:
