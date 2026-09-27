@@ -126,6 +126,22 @@ Live vLLM telemetry during the run stabilized around 49–50 tok/s aggregate. Al
 
 Result: **PP=3 is much worse than PP=2** on this mixed 50HX + 50HX + 40HX setup. The slower CMP40HX / Gen1 x1 stage appears to bottleneck the entire pipeline.
 
+
+### 1× CMP50HX + 1× CMP40HX, Pipeline Parallel = 2
+
+Manual PP=2 server used GPU0 (CMP50HX, Gen2 x4) + GPU2 (CMP40HX, Gen1 x1).
+
+Benchmark result:
+
+- Wall time: **186.017 s**
+- Aggregate output throughput: **33.03 tok/s**
+- Per-request throughput: **2.75 tok/s**
+- 6144 output tokens total
+
+Live telemetry during the run showed GPU0 at about 59.65 W and GPU2 at about 80.99 W despite 99–100% reported GPU load, again consistent with pipeline waiting/stalls rather than full compute saturation.
+
+This was even slower than the 3-GPU PP=3 run (47.40 tok/s). A likely explanation is that with PP=2 the slower CMP40HX must process roughly half of the model stages, while with PP=3 it receives a smaller share; either way the heterogeneous CMP40HX/Gen1 x1 stage is a severe bottleneck.
+
 ## Practical conclusion
 
 For this BTCpro host:
