@@ -142,6 +142,55 @@ Live telemetry during the run showed GPU0 at about 59.65 W and GPU2 at about 80.
 
 This was even slower than the 3-GPU PP=3 run (47.40 tok/s). A likely explanation is that with PP=2 the slower CMP40HX must process roughly half of the model stages, while with PP=3 it receives a smaller share; either way the heterogeneous CMP40HX/Gen1 x1 stage is a severe bottleneck.
 
+
+## Reproducible benchmark protocol
+
+Use the committed harness:
+
+```bash
+python3 benchmarks/vllm_chat_bench.py \
+  --url http://127.0.0.1:8013/v1/chat/completions \
+  --model /home/ai6/models/vllm/Qwen3-14B-AWQ \
+  -n 12 \
+  -o 512
+```
+
+Fixed benchmark prompt:
+
+```text
+Write a production-quality Python implementation of an asynchronous HTTP crawler with retries, timeout handling, URL deduplication, SHA256 hashing, logging, graceful shutdown, and type hints.
+```
+
+Benchmark rules for future GPU comparisons:
+
+1. Keep the exact model, prompt, context limit, output length and concurrency unless explicitly testing one of those variables.
+2. Keep `temperature=0` and `enable_thinking=False`.
+3. Record GPU model, PCIe generation/width, TP/PP layout, vLLM version, driver, CUDA runtime, CPU/RAM and power limits.
+4. Run one warm-up pass first. The first pass may include Triton/JIT/graph compilation and can under-report steady-state throughput.
+5. Record at least the next two warm runs, including wall time, aggregate tok/s and per-request tok/s.
+6. Do not compare a prefix-cache-heavy run to a cold-cache run as if they were identical. Record prefix-cache hit rate when visible.
+7. For multi-GPU tests, record whether P2P/custom all-reduce is available and which NCCL/communication backend vLLM selects.
+
+The purpose is to make the later P104 tests directly comparable to the CMP results.
+
+### Warm-repeat PP=2 results, 2× CMP50HX
+
+After restarting the known-good 2× CMP50HX PP=2 configuration, the same 12×512 test was repeated:
+
+- First run after startup: **285.25 tok/s**, wall **21.539 s**, per request **23.77 tok/s**
+- Immediate second/warm run: **338.02 tok/s**, wall **18.176 s**, per request **28.17 tok/s**
+- Earlier reference run: **311.33 tok/s**, wall **19.735 s**, per request **25.94 tok/s**
+
+The warm repeat confirms that the 2× CMP50HX PP=2 setup consistently operates in roughly the 300+ tok/s class for this exact workload, while startup/JIT/cache state can move a short benchmark by around 10% or more.
+
+During the 338 tok/s run, telemetry showed approximately:
+
+- GPU0 CMP50HX Gen2 x4: ~132 W, ~45% memory utilization
+- GPU1 CMP50HX Gen2 x1: ~151 W, ~64% memory utilization
+
+This is materially different from the heterogeneous CMP40 pipeline tests, where reported GPU load stayed near 100% but board power remained only around 60–80 W, consistent with waiting/stalls rather than dense compute.
+
+
 ## Practical conclusion
 
 For this BTCpro host:
