@@ -12,6 +12,7 @@ Ultra-budget local AI homelab built around six NVIDIA P104-100 8 GB GPUs, llama.
 - [Coding-agent system prompt](configs/coding-agent-system-prompt.md)
 - [AI6 Host Monitor](monitor/README_RU.md)
 - [CMP 50HX PCIe Gen2 x4 на Huanan X79](docs/CMP50HX_HUANAN_X79_GEN2_RU.md)
+- [MacroSilicon MS912C USB→VGA на Huanan X79](docs/MS912C_USB_VGA_HUANAN_RU.md)
 
 ## Highlights
 
