@@ -139,3 +139,76 @@ nvidia-smi --query-gpu=pcie.link.gen.current,pcie.link.gen.max,pcie.link.width.c
 ## Примечание
 
 Этот рецепт меняет PCIe link policy/runtime state. Он не прошивает VBIOS. При cold boot состояние GPU-side возвращается и service должен применить unlock снова.
+
+
+## 2026-09-30: проверенный Linux Stage2 после UEFI unlock
+
+После cold boot через `40HXUNLK.EFI` compute unlock подтверждён значениями:
+
+```text
+SS0 = 0x88888888
+SS1 = 0x00000008
+```
+
+При этом карта стартует как Gen1 x16. Простая запись PL0 из Linux без дальнейшего recovery может оставить root port в состоянии `Width x0`. Рабочая последовательность для Huanan X79 v2.49 оказалась такой:
+
+1. Остановить сервисы, использующие GPU.
+2. Unbind `nvidia` от CMP40.
+3. Выставить root `LNKCTL2 TLS=2`.
+4. Записать PL0:
+   - `0x8872C = 0x00000006`
+   - `0x8C040 = 0x80085800`
+   - `0x8841C = 0xE0B42D00`
+   - `0x8C2C0 = 0x068731B3`
+5. Выполнить Root Link Disable/Enable.
+6. На этом этапе link успешно тренируется в `5GT/s x16`, но NVIDIA после прямого bind может не восстановиться.
+7. Выполнить PCI `remove` для `03:00.0`, затем `/sys/bus/pci/rescan`. После этого драйвер `nvidia` снова цепляется и `nvidia-smi` работает.
+8. После rescan линк может снова оказаться Gen1 x16, хотя `LnkCap=5GT/s` и `LnkCtl2 Target=5GT/s`.
+9. Повторно записать PL0 при уже работающем NVIDIA, снова выставить TLS=2 на GPU и root.
+10. Один retrain через root port `00:02.0` поднимает фактический линк до Gen2 x16.
+
+Финальная проверка:
+
+```text
+LnkCap: Speed 5GT/s, Width x16
+LnkSta: Speed 5GT/s, Width x16
+LnkCtl2: Target Link Speed: 5GT/s
+
+nvidia-smi:
+pcie.link.gen.current = 2
+pcie.link.gen.max = 2
+pcie.link.width.current = 16
+pcie.link.width.max = 16
+```
+
+Реальный CUDA pinned-memory bandwidth после Stage2:
+
+| Transfer | 256 MiB | 512 MiB | 1024 MiB |
+|---|---:|---:|---:|
+| H2D | 5.82 GiB/s | 5.80 GiB/s | 5.81 GiB/s |
+| D2H | 6.20 GiB/s | 6.21 GiB/s | 6.14 GiB/s |
+
+Контрольный результат после `remove/rescan`, но до повторного PL0 + root retrain, был только около 2.91–3.10 GiB/s и `pcie.link.gen.current=1`, поэтому финальные ~6 GiB/s подтверждают настоящий Gen2 x16.
+
+### Скрипт Stage2
+
+Проверенная последовательность сохранена в:
+
+```text
+deploy/cmp40hx-gen2-stage2.py
+```
+
+Пока запускать только вручную. Старый `cmp40hx-gen2.service` оставлять выключенным: его ранний автозапуск и старая последовательность не соответствуют подтверждённому Stage2 recovery.
+
+Рекомендуемый ручной запуск после успешного UEFI compute unlock:
+
+```bash
+sudo systemctl stop ai6-monitor
+sudo python3 deploy/cmp40hx-gen2-stage2.py
+```
+
+После подтверждения `*** GEN2 X16 ACHIEVED ***` можно снова запустить монитор:
+
+```bash
+sudo systemctl start ai6-monitor
+```
