@@ -1,0 +1,139 @@
+host RAM available at start: 64.10 GB of 67.3 GB
+GPU: NVIDIA CMP 40HX
+  python: 3.12.3
+  soup-cli: 0.75.0
+  commit: f0bb65061caa10d9e231425269827f9288927551
+  torch: 2.14.1+cu130
+  bitsandbytes: 0.50.2
+  transformers: 5.18.0
+  peft: 0.21.1
+  trl: 0.29.1
+  accelerate: 1.15.0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 10 files:  10%|█         | 1/10 [00:00<00:05,  1.70it/s]Fetching 10 files:  20%|██        | 2/10 [00:00<00:02,  2.77it/s]Fetching 10 files:  40%|████      | 4/10 [00:00<00:01,  5.35it/s]Fetching 10 files:  50%|█████     | 5/10 [00:01<00:01,  3.58it/s]Fetching 10 files:  60%|██████    | 6/10 [00:14<00:17,  4.30s/it]Fetching 10 files:  70%|███████   | 7/10 [01:32<01:20, 26.77s/it]host RAM available at start: 64.08 GB of 67.3 GB
+GPU: NVIDIA CMP 40HX
+  python: 3.12.3
+  soup-cli: 0.75.0
+  commit: f0bb65061caa10d9e231425269827f9288927551
+  torch: 2.14.1+cu130
+  bitsandbytes: 0.50.2
+  transformers: 5.18.0
+  peft: 0.21.1
+  trl: 0.29.1
+  accelerate: 1.15.0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 10 files:  80%|████████  | 8/10 [03:39<00:54, 27.43s/it]Fetching 10 files:  90%|█████████ | 9/10 [03:53<00:25, 25.46s/it]Fetching 10 files: 100%|██████████| 10/10 [04:01<00:00, 22.35s/it]Fetching 10 files: 100%|██████████| 10/10 [04:01<00:00, 24.19s/it]
+Traceback (most recent call last):
+  File "/mnt/nvme/data/soup/benchmarks/harness/issue361_nf4_throughput.py", line 587, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/mnt/nvme/data/soup/benchmarks/harness/issue361_nf4_throughput.py", line 355, in main
+    weights_dir = resolve_model_weights(args.weights)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/spectrum_scan.py", line 890, in resolve_model_weights
+    return materialize_model_weights(plan)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/spectrum_scan.py", line 878, in materialize_model_weights
+    return _materialize_cached_snapshot(plan)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/spectrum_scan.py", line 757, in _materialize_cached_snapshot
+    entries = _snapshot_materialization_entries(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/spectrum_scan.py", line 693, in _snapshot_materialization_entries
+    raise ValueError(
+ValueError: cached snapshot file 'tokenizer.json' points outside the Hugging Face blob store
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+host RAM available at start: 64.00 GB of 67.3 GB
+GPU: NVIDIA CMP 40HX
+  python: 3.12.3
+  soup-cli: 0.75.0
+  commit: f0bb65061caa10d9e231425269827f9288927551
+  torch: 2.14.1+cu130
+  bitsandbytes: 0.50.2
+  transformers: 5.18.0
+  peft: 0.21.1
+  trl: 0.29.1
+  accelerate: 1.15.0
+weights resolved -> /mnt/nvme/data/models/llama31-8b-unsloth (0.0 s)
+param split (safetensors headers): decoder 6.980 B, embed 0.525 B, lm_head-in-file 0.525 B, tied=False; GFLOP/token = 6*decoder + 4*lm_head = 43.98
+Traceback (most recent call last):
+  File "/mnt/nvme/data/soup/benchmarks/harness/issue361_nf4_throughput.py", line 587, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/mnt/nvme/data/soup/benchmarks/harness/issue361_nf4_throughput.py", line 379, in main
+    index = shard_checkpoint(
+            ^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/layer_shard.py", line 1039, in shard_checkpoint
+    resolved_out = _validate_out_dir(out_dir)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/layer_shard.py", line 760, in _validate_out_dir
+    raise ValueError(
+ValueError: shard output directory must be under $HOME, $CWD or $TMPDIR; got /mnt/nvme/data/models/soup-shards/llama31-8b-unsloth-nf4
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+host RAM available at start: 63.98 GB of 67.3 GB
+GPU: NVIDIA CMP 40HX
+  python: 3.12.3
+  soup-cli: 0.75.0
+  commit: f0bb65061caa10d9e231425269827f9288927551
+  torch: 2.14.1+cu130
+  bitsandbytes: 0.50.2
+  transformers: 5.18.0
+  peft: 0.21.1
+  trl: 0.29.1
+  accelerate: 1.15.0
+weights resolved -> /mnt/nvme/data/models/llama31-8b-unsloth (0.0 s)
+param split (safetensors headers): decoder 6.980 B, embed 0.525 B, lm_head-in-file 0.525 B, tied=False; GFLOP/token = 6*decoder + 4*lm_head = 43.98
+Traceback (most recent call last):
+  File "/mnt/nvme/data/soup/benchmarks/harness/issue361_nf4_throughput.py", line 587, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/mnt/nvme/data/soup/benchmarks/harness/issue361_nf4_throughput.py", line 379, in main
+    index = shard_checkpoint(
+            ^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/layer_shard.py", line 1039, in shard_checkpoint
+    resolved_out = _validate_out_dir(out_dir)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme/data/soup/src/soup_cli/utils/layer_shard.py", line 760, in _validate_out_dir
+    raise ValueError(
+ValueError: shard output directory must be under $HOME, $CWD or $TMPDIR; got /mnt/nvme/data/models/soup-shards/llama31-8b-unsloth-nf4
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+host RAM available at start: 63.99 GB of 67.3 GB
+GPU: NVIDIA CMP 40HX
+  python: 3.12.3
+  soup-cli: 0.75.0
+  commit: f0bb65061caa10d9e231425269827f9288927551
+  torch: 2.14.1+cu130
+  bitsandbytes: 0.50.2
+  transformers: 5.18.0
+  peft: 0.21.1
+  trl: 0.29.1
+  accelerate: 1.15.0
+weights resolved -> /mnt/nvme/data/models/llama31-8b-unsloth (0.0 s)
+param split (safetensors headers): decoder 6.980 B, embed 0.525 B, lm_head-in-file 0.525 B, tied=False; GFLOP/token = 6*decoder + 4*lm_head = 43.98
+  [yellow]Re-sharding layer cache:[/] cache index is missing or unreadable.
+shards ready in 48.0 s -> /mnt/nvme/data/models/soup-shards/llama31-8b-unsloth-nf4
+streamed model built in 4.8 s | store 5.70 GB pinned
+trainable LoRA params: 6,815,744
+warm-up done (10 steps, last loss 12.8101) — measuring
+
+================ MEASURED ROW (#361 protocol) ================
+weights:            /mnt/nvme/data/models/llama31-8b-unsloth
+source commit:      f0bb65061caa10d9e231425269827f9288927551
+quant/dtype:        nf4 / float16 / double_quant=True
+LoRA:               r=16 alpha=32 on q_proj,v_proj
+seq x batch:        512 x 1 | buffers 2
+steps:              10 warm-up + 50 measured
+store:              5.70 GB pinned
+tok/s:              174.7
+step time:          median 2931 ms | min 2924 | max 2940 | stdev 4 ms
+loss:               first 12.7234 -> last 0.3460
+peak VRAM:          2.40 GB allocated (2.61 GB reserved)
+GPU util / SM clock: 100% / 1905 MHz (median of 277 samples, max temp 69 C)
+SM clock now:       1755 MHz
+GFLOP/token:        43.98 (decoder C=6 + lm_head C=4, embed 0)
+eff TFLOPS:         7.68
+GEMM ceiling:       48.88 TFLOPS bf16 @ 1635 MHz (same session) -> 16% of ceiling
+shard build:        48.0 s | model build: 4.8 s
+versions:           {"python": "3.12.3", "soup-cli": "0.75.0", "commit": "f0bb65061caa10d9e231425269827f9288927551", "torch": "2.14.1+cu130", "bitsandbytes": "0.50.2", "transformers": "5.18.0", "peft": "0.21.1", "trl": "0.29.1", "accelerate": "1.15.0"}
+================================================================
+row written -> /mnt/nvme/data/benchmarks/huanan-cmp40-soup/cmp40-stock-gen1x16-unsloth.json

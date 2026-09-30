@@ -1,0 +1,62 @@
+{
+  "status": "ok",
+  "issue": 361,
+  "weights": "/mnt/nvme/data/models/llama31-8b-unsloth",
+  "quant": "nf4",
+  "stream_dtype": "float16",
+  "seq": 512,
+  "batch": 1,
+  "warmup_steps": 10,
+  "measured_steps": 50,
+  "buffers": 2,
+  "lora_r": 16,
+  "targets": "q_proj,v_proj",
+  "pin_required": true,
+  "store_gb_pinned": 5.702,
+  "param_split": {
+    "decoder": 6979588096,
+    "embed": 525336576,
+    "lm_head_file": 525336576,
+    "lm_head_effective": 525336576,
+    "tied": false
+  },
+  "tokens_per_s": 174.67,
+  "step_time_ms": {
+    "median": 2931.6,
+    "min": 2925.6,
+    "max": 2939.2,
+    "stdev": 3.5
+  },
+  "loss_first": 12.723153114318848,
+  "loss_last": 0.5985621213912964,
+  "peak_vram_gb": {
+    "allocated": 2.397,
+    "reserved": 2.703
+  },
+  "gpu": {
+    "util": 100,
+    "clock": 1875,
+    "temp_max": 75,
+    "n": 276
+  },
+  "sm_clock_mhz_end": 1830,
+  "gflop_per_token": 43.9789,
+  "effective_tflops": 7.682,
+  "gemm_ceiling": {
+    "tflops": 48.411,
+    "sm_clock_mhz": 1545
+  },
+  "shard_build_s": 0.0,
+  "model_build_s": 4.8,
+  "versions": {
+    "python": "3.12.3",
+    "soup-cli": "0.75.0",
+    "commit": "f0bb65061caa10d9e231425269827f9288927551",
+    "torch": "2.14.1+cu130",
+    "bitsandbytes": "0.50.2",
+    "transformers": "5.18.0",
+    "peft": "0.21.1",
+    "trl": "0.29.1",
+    "accelerate": "1.15.0"
+  }
+}
