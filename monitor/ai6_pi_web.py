@@ -52,6 +52,12 @@ class NodeStopCommand(BaseModel):
     port: int
 
 
+class NodeGpuPolicyCommand(BaseModel):
+    name: str
+    gpu: int
+    allow_auto: bool
+
+
 class PiChatCommand(BaseModel):
     prompt: str = Field(min_length=1, max_length=12000)
     model: str = Field(default="8b", max_length=256)
@@ -224,6 +230,26 @@ def pi_node_add(cmd: NodeCommand):
 @base.app.delete("/api/pi/nodes/{name}")
 def pi_node_delete(name: str):
     _save_nodes([x for x in _load_nodes() if x.get("name") != name])
+    return {"ok": True}
+
+
+@base.app.post("/api/pi/nodes/gpu-policy")
+def pi_node_gpu_policy(cmd: NodeGpuPolicyCommand):
+    items = _load_nodes()
+    found = False
+    for item in items:
+        if item.get("name") != cmd.name:
+            continue
+        found = True
+        disabled = set(int(x) for x in item.get("disabled_gpus", []))
+        if cmd.allow_auto:
+            disabled.discard(cmd.gpu)
+        else:
+            disabled.add(cmd.gpu)
+        item["disabled_gpus"] = sorted(disabled)
+    if not found:
+        raise base.HTTPException(status_code=404, detail="managed node not found")
+    _save_nodes(items)
     return {"ok": True}
 
 
@@ -514,7 +540,7 @@ def install():
     dashboard = dashboard.replace(old, new, 1)
     dashboard = dashboard.replace(
         "</style></head><body>",
-        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}.pi-node{padding:8px 0;border-bottom:1px solid #292929}.pi-node-start{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:6px}.pi-node-start select{max-width:420px;padding:5px}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
+        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}.pi-node{padding:8px 0;border-bottom:1px solid #292929}.pi-node-start{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:6px}.pi-node-start select{max-width:420px;padding:5px}.pi-gpu-policies{display:flex;gap:10px;flex-wrap:wrap;margin:5px 0;font-size:11px}.pi-gpu-policy{color:#bbb}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
 </style></head><body>''',
         1,
     )
@@ -540,12 +566,13 @@ async function loadPiNodes(){
  try{
   const r=await fetch('/api/pi/nodes');const d=await r.json();const ns=d.nodes||[];
   piNodes.innerHTML=ns.length?ns.map(n=>{
-   const gs=(n.gpus||[]).map(g=>'GPU'+g.index+' '+g.name+' '+Math.round(g.memory_total_mib||0)+'MiB').join(' • ');
-   const opts=(n.models||[]).map(m=>'<option value="'+escPi(m.path)+'">'+escPi(m.label)+'</option>').join('');
    const disabled=new Set((n.disabled_gpus||[]).map(Number));
+   const gs=(n.gpus||[]).map(g=>'GPU'+g.index+' '+g.name+' '+Math.round(g.memory_total_mib||0)+'MiB').join(' • ');
+   const policies=(n.gpus||[]).map(g=>'<label class="pi-gpu-policy"><input type="checkbox" '+(!disabled.has(Number(g.index))?'checked':'')+' onchange="setPiGpuPolicy(\''+encodeURIComponent(n.name)+'\','+g.index+',this.checked)"> GPU '+g.index+' Auto</label>').join(' ');
+   const opts=(n.models||[]).map(m=>'<option value="'+escPi(m.path)+'">'+escPi(m.label)+'</option>').join('');
    const gpuChecks='<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpuAuto" data-node="'+encodeURIComponent(n.name)+'" value="auto" checked>Auto</label> '+(n.gpus||[]).map(g=>'<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpu" data-node="'+encodeURIComponent(n.name)+'" value="'+g.index+'" '+(disabled.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+(disabled.has(Number(g.index))?' (disabled)':'')+'</label>').join(' ');
    const workers=Object.entries(n.workers||{}).map(([p,w])=>'<span>'+p+' '+escPi(w.status_text||w.state||'')+(w.managed?'':' <button onclick="stopPiNodeWorker(\''+encodeURIComponent(n.name)+'\','+p+')">Stop</button>')+'</span>').join(' • ');
-   return '<div class="pi-node"><b>'+escPi(n.name)+'</b> • '+(n.online?'🟢':'🔴')+' '+escPi(n.monitor_url)+'<div class="section-sub">'+escPi(gs)+(n.error?' • '+escPi(n.error):'')+'</div>'+(n.online?'<div class="pi-node-start"><select id="nodeModel_'+encodeURIComponent(n.name)+'">'+opts+'</select><span>'+gpuChecks+'</span><select id="nodeCtx_'+encodeURIComponent(n.name)+'"><option>8192</option><option>16384</option><option>32768</option></select><button onclick="startPiNodeWorker(\''+encodeURIComponent(n.name)+'\')">Start + attach</button><button onclick="deletePiNode(\''+encodeURIComponent(n.name)+'\')">Delete node</button></div><div class="section-sub">'+workers+'</div>':'')+'</div>';
+   return '<div class="pi-node"><b>'+escPi(n.name)+'</b> • '+(n.online?'🟢':'🔴')+' '+escPi(n.monitor_url)+'<div class="section-sub">'+escPi(gs)+(n.error?' • '+escPi(n.error):'')+'</div><div class="pi-gpu-policies">'+policies+'</div>'+(n.online?'<div class="pi-node-start"><select id="nodeModel_'+encodeURIComponent(n.name)+'">'+opts+'</select><span>'+gpuChecks+'</span><select id="nodeCtx_'+encodeURIComponent(n.name)+'"><option>8192</option><option>16384</option><option>32768</option></select><button onclick="startPiNodeWorker(\''+encodeURIComponent(n.name)+'\')">Start + attach</button><button onclick="deletePiNode(\''+encodeURIComponent(n.name)+'\')">Delete node</button></div><div class="section-sub">'+workers+'</div>':'')+'</div>';
   }).join(''):'No managed nodes configured.';
  }catch(e){piNodes.textContent='Nodes error: '+e.message}
 }
@@ -555,6 +582,10 @@ async function addPiNode(){
  try{const r=await fetch('/api/pi/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));piNodeName.value='';piNodeUrl.value='';await loadPiNodes()}catch(e){piNodes.textContent='ERROR: '+e.message}
 }
 async function deletePiNode(name){await fetch('/api/pi/nodes/'+name,{method:'DELETE'});loadPiNodes()}
+async function setPiGpuPolicy(enc,gpu,allow_auto){
+ const name=decodeURIComponent(enc);
+ try{const r=await fetch('/api/pi/nodes/gpu-policy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,gpu,allow_auto})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiNodes()}catch(e){alert('GPU policy: '+e.message);await loadPiNodes()}
+}
 async function startPiNodeWorker(enc){
  const name=decodeURIComponent(enc), model=document.getElementById('nodeModel_'+enc).value,ctx=Number(document.getElementById('nodeCtx_'+enc).value);
  const gpus=[...document.querySelectorAll('.nodeGpu[data-node="'+enc+'"]:checked')].map(x=>Number(x.value));
