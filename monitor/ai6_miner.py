@@ -29,7 +29,8 @@ _MINER_LOG = Path(os.environ.get("AI6_MINER_LOG", str(_STATE_DIR / "forge-miner.
 _MINER_PID = Path(os.environ.get("AI6_MINER_PID", str(_STATE_DIR / "forge-miner.pid")))
 _CMP_TUNE_STATE = Path(os.environ.get("AI6_CMP_TUNE_STATE", str(_STATE_DIR / "cmp-tune-state.json")))
 _CMP_TUNE_BIN = os.environ.get("AI6_CMP_TUNE_BIN", "/usr/local/sbin/cmp-tune")
-_CMP_TUNE_CTL = os.environ.get("AI6_CMP_TUNE_CTL", "/usr/local/sbin/ai6-cmptune")\n_MINER_CTL = os.environ.get("AI6_MINER_CTL", "/usr/local/sbin/ai6-minerctl")
+_CMP_TUNE_CTL = os.environ.get("AI6_CMP_TUNE_CTL", "/usr/local/sbin/ai6-cmptune")
+_MINER_CTL = os.environ.get("AI6_MINER_CTL", "/usr/local/sbin/ai6-minerctl")
 _MARKET_CACHE = {"ts": 0.0, "data": {}}
 _KRYPTEX_CACHE = {"ts": 0.0, "wallet": "", "data": {}}
 _MARKET_HISTORY = Path(os.environ.get("AI6_MARKET_HISTORY", str(_STATE_DIR / "prl-market-history.json")))
