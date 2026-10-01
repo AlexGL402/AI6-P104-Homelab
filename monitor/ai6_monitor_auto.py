@@ -6,12 +6,14 @@ import ai6_vllm
 import ai6_miner
 import ai6_insights
 import ai6_soup
+import ai6_pi_web
 
 # Add the dedicated vLLM, miner and insights tabs/APIs on top of the dynamic monitor.
 ai6_vllm.install()
 ai6_miner.install()
 ai6_insights.install()
 ai6_soup.install()
+ai6_pi_web.install()
 
 # Finalize all top-level tabs in one place. This avoids nested-pane/layout
 # corruption when optional modules are injected independently.
