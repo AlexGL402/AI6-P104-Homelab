@@ -200,10 +200,17 @@ def pi_nodes():
             root = item["monitor_url"].rstrip("/")
             stats = _json_request(root + "/api/stats", timeout=3)
             models = _json_request(root + "/api/models", timeout=3).get("models", [])
+            ollama_models = []
+            try:
+                parsed = urllib.parse.urlsplit(root)
+                ollama_url = f"{parsed.scheme}://{parsed.hostname}:11434/v1"
+                ollama_models = _discover_models(ollama_url, "ollama")
+            except Exception:
+                pass
             row.update({"online": True, "host": stats.get("host", {}),
                         "gpus": stats.get("gpu", {}).get("devices", []),
                         "workers": stats.get("llama", {}).get("workers", {}),
-                        "models": models})
+                        "models": models, "ollama_models": ollama_models})
         except Exception as e:
             row.update({"online": False, "error": str(e), "gpus": [], "workers": {}, "models": []})
         out.append(row)
@@ -569,7 +576,9 @@ async function loadPiNodes(){
    const disabled=new Set((n.disabled_gpus||[]).map(Number));
    const gs=(n.gpus||[]).map(g=>'GPU'+g.index+' '+g.name+' '+Math.round(g.memory_total_mib||0)+'MiB').join(' • ');
    const policies=(n.gpus||[]).map(g=>'<label class="pi-gpu-policy"><input type="checkbox" '+(!disabled.has(Number(g.index))?'checked':'')+' onchange="setPiGpuPolicy(\''+encodeURIComponent(n.name)+'\','+g.index+',this.checked)"> GPU '+g.index+' Auto</label>').join(' ');
-   const opts=(n.models||[]).map(m=>'<option value="'+escPi(m.path)+'">'+escPi(m.label)+'</option>').join('');
+   const ggufOpts=(n.models||[]).map(m=>'<option value="gguf:'+escPi(m.path)+'">GGUF • '+escPi(m.label)+'</option>').join('');
+   const ollamaOpts=(n.ollama_models||[]).map(m=>'<option value="ollama:'+escPi(m)+'">Ollama • '+escPi(m)+'</option>').join('');
+   const opts=ggufOpts+ollamaOpts;
    const gpuChecks='<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpuAuto" data-node="'+encodeURIComponent(n.name)+'" value="auto" checked>Auto</label> '+(n.gpus||[]).map(g=>'<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpu" data-node="'+encodeURIComponent(n.name)+'" value="'+g.index+'" '+(disabled.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+(disabled.has(Number(g.index))?' (disabled)':'')+'</label>').join(' ');
    const workers=Object.entries(n.workers||{}).map(([p,w])=>'<span>'+p+' '+escPi(w.status_text||w.state||'')+(w.managed?'':' <button onclick="stopPiNodeWorker(\''+encodeURIComponent(n.name)+'\','+p+')">Stop</button>')+'</span>').join(' • ');
    return '<div class="pi-node"><b>'+escPi(n.name)+'</b> • '+(n.online?'🟢':'🔴')+' '+escPi(n.monitor_url)+'<div class="section-sub">'+escPi(gs)+(n.error?' • '+escPi(n.error):'')+'</div><div class="pi-gpu-policies">'+policies+'</div>'+(n.online?'<div class="pi-node-start"><select id="nodeModel_'+encodeURIComponent(n.name)+'">'+opts+'</select><span>'+gpuChecks+'</span><select id="nodeCtx_'+encodeURIComponent(n.name)+'"><option>8192</option><option>16384</option><option>32768</option></select><button onclick="startPiNodeWorker(\''+encodeURIComponent(n.name)+'\')">Start + attach</button><button onclick="deletePiNode(\''+encodeURIComponent(n.name)+'\')">Delete node</button></div><div class="section-sub">'+workers+'</div>':'')+'</div>';
@@ -587,7 +596,14 @@ async function setPiGpuPolicy(enc,gpu,allow_auto){
  try{const r=await fetch('/api/pi/nodes/gpu-policy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,gpu,allow_auto})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiNodes()}catch(e){alert('GPU policy: '+e.message);await loadPiNodes()}
 }
 async function startPiNodeWorker(enc){
- const name=decodeURIComponent(enc), model=document.getElementById('nodeModel_'+enc).value,ctx=Number(document.getElementById('nodeCtx_'+enc).value);
+ const name=decodeURIComponent(enc), rawModel=document.getElementById('nodeModel_'+enc).value,ctx=Number(document.getElementById('nodeCtx_'+enc).value);
+ if(rawModel.startsWith('ollama:')){
+  const model=rawModel.slice(7);const nodes=(await (await fetch('/api/pi/nodes')).json()).nodes||[];const n=nodes.find(x=>x.name===name);if(!n){alert('Node not found');return}
+  const u=new URL(n.monitor_url);const base=u.protocol+'//'+u.hostname+':11434/v1';
+  piStatus.textContent='● Attaching Ollama '+model+' @ '+name+'…';piStatus.className='status loading';
+  try{const r=await fetch('/api/pi/providers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name+'-ollama',base_url:base,api_key:'ollama'})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiWorkers();const key='ai6-web-'+(name+'-ollama').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');const wanted=key+'::'+model;if([...piModel.options].some(x=>x.value===wanted))piModel.value=wanted;piStatus.textContent='● Ollama ready • '+model+' @ '+name;piStatus.className='status ready'}catch(e){piStatus.textContent='● Ollama attach error: '+e.message;piStatus.className='status error'}return
+ }
+ const model=rawModel.startsWith('gguf:')?rawModel.slice(5):rawModel;
  const gpus=[...document.querySelectorAll('.nodeGpu[data-node="'+enc+'"]:checked')].map(x=>Number(x.value));
  piStatus.textContent='● Starting '+name+' worker…';piStatus.className='status loading';
  try{const r=await fetch('/api/pi/nodes/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,model,gpus,split:'layer',ctx,ngl:999,alias:'pi'})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiNodes();await loadPiWorkers();if(d.ready&&d.provider){const key='ai6-web-'+d.provider.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');const wanted=key+'::'+(d.models||[])[0];if([...piModel.options].some(x=>x.value===wanted))piModel.value=wanted}piStatus.textContent=d.ready?'● Remote worker ready • '+d.provider+' • GPU '+(d.gpus||[]).join(','):'● Worker started on '+d.port+' • still loading';piStatus.className=d.ready?'status ready':'status loading'}catch(e){piStatus.textContent='● Remote start error: '+e.message;piStatus.className='status error'}
