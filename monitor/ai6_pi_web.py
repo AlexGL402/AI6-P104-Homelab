@@ -747,8 +747,9 @@ async function loadBenchNodes(){
  }catch(e){benchRunStatus.textContent='Node list error: '+e.message}
 }
 async function benchNodeChanged(){
- const nodeValue=benchNode.value;
- benchModel.innerHTML='<option value="">Loading models…</option>';benchGpu.innerHTML='<option value="auto">Loading GPUs…</option>';
+ const nodeSel=document.getElementById('benchNode'),modelSel0=document.getElementById('benchModel'),gpuSel0=document.getElementById('benchGpu');
+ const nodeValue=nodeSel.value;
+ modelSel0.innerHTML='<option value="">Loading models…</option>';gpuSel0.innerHTML='<option value="auto">Loading GPUs…</option>';
  try{
   const d=await (await fetch('/api/pi/nodes?ts='+Date.now(),{cache:'no-store'})).json();
   piNodeCache=d.nodes||[];
@@ -766,18 +767,19 @@ async function benchNodeChanged(){
   // Do not HTML-escape option values/text while constructing DOM with innerHTML:
   // escPi is for chat rendering and was turning model paths into markup/empty options
   // in some browsers. Build real Option nodes instead.
-  benchModel.replaceChildren();
+  const modelSel=document.getElementById('benchModel'),gpuSel=document.getElementById('benchGpu');
+  modelSel.options.length=0;
   if(ms.length){
-   for(const m of ms){const o=document.createElement('option');o.value=m.v;o.textContent=m.t;benchModel.appendChild(o)}
+   for(const m of ms){const o=document.createElement('option');o.value=m.v;o.text=m.t;modelSel.add(o)}
   }else{
-   const o=document.createElement('option');o.value='';o.textContent='No models discovered';benchModel.appendChild(o);
+   const o=document.createElement('option');o.value='';o.text='No models discovered';modelSel.add(o);
   }
   const dis=new Set((n.disabled_gpus||[]).map(Number));
-  benchGpu.replaceChildren();let go=new Option('Auto','auto');benchGpu.appendChild(go);
-  for(const g of (n.gpus||[])){go=new Option('GPU '+g.index+' • '+String(g.name||''),String(g.index));go.disabled=dis.has(Number(g.index));benchGpu.appendChild(go)}
-  if((n.gpus||[]).length>1)benchGpu.appendChild(new Option('All enabled GPUs','all'));
+  gpuSel.options.length=0;let go=document.createElement('option');go.value='auto';go.text='Auto';gpuSel.add(go);
+  for(const g of (n.gpus||[])){go=document.createElement('option');go.value=String(g.index);go.text='GPU '+g.index+' • '+String(g.name||'');go.disabled=dis.has(Number(g.index));gpuSel.add(go)}
+  if((n.gpus||[]).length>1){go=document.createElement('option');go.value='all';go.text='All enabled GPUs';gpuSel.add(go)}
   benchRunStatus.textContent='Discovered: '+(n.models||[]).length+' GGUF • '+(n.running_models||[]).length+' running • '+(n.ollama_models||[]).length+' Ollama';
- }catch(e){benchModel.innerHTML='<option value="">Discovery error</option>';benchGpu.innerHTML='<option value="auto">Auto</option>';benchRunStatus.textContent='Discovery ERROR: '+e.message}
+ }catch(e){document.getElementById('benchModel').innerHTML='<option value="">Discovery error</option>';document.getElementById('benchGpu').innerHTML='<option value="auto">Auto</option>';document.getElementById('benchRunStatus').textContent='Discovery ERROR: '+e.message}
 }
 async function runModelBench(){
  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n||!benchModel.value)return;
