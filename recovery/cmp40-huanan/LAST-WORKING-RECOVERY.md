@@ -93,15 +93,15 @@ The Soup NF4 streamed LoRA benchmark was rerun after recovery:
 
 Result: PASS. Soup/CMP40 AI performance returned to the saved baseline.
 
-## Forge/PearlHash caveat
+## Forge/PearlHash validation
 
-A normally initialized GPU is not by itself proof that PearlHash full-speed unlock is active.
+Forge/PearlHash was confirmed working again after the same recovery.
 
-Historical CMP40 PearlHash result:
+Historical CMP40 PearlHash reference:
 - about 51.0–51.7 TH/s at about 183 W
 
-The most recent Miner UI observation before the Soup validation was about 1.04 TH/s. Therefore the AI/Soup recovery is confirmed, while PearlHash full-speed recovery still needs separate work.
+The earlier ~1.04 TH/s observation belongs to the broken pre-recovery state and must not be treated as the current state.
 
-For TU106, `forge --cmp-verify` reports that live unlock state is not observable and says to use miner TUI hashrate.
+For TU106, `forge --cmp-verify` does not expose the live unlock state; use the miner TUI hashrate for validation.
 
-Do not change BIOS, enable Above 4G, force Gen2, or boot the EFI unlock merely to address this mining discrepancy. Preserve this working AI state first.
+Do not change BIOS, enable Above 4G, force Gen2, or boot the EFI unlock. Preserve the current working AI + Forge state.
