@@ -5,11 +5,13 @@ import ai6_monitor_dynamic as dynamic
 import ai6_vllm
 import ai6_miner
 import ai6_insights
+import ai6_soup
 
 # Add the dedicated vLLM, miner and insights tabs/APIs on top of the dynamic monitor.
 ai6_vllm.install()
 ai6_miner.install()
 ai6_insights.install()
+ai6_soup.install()
 
 # Finalize all top-level tabs in one place. This avoids nested-pane/layout
 # corruption when optional modules are injected independently.
@@ -22,6 +24,8 @@ _tab_js = r"""
       vllm: ['vllmTab','tabVllmBtn'],
       benchs: ['benchsTab','tabBenchsBtn'],
       miner: ['minerTab','tabMinerBtn'],
+      soup: ['soupTab','tabSoupBtn'],
+      pi: ['piTab','tabPiBtn'],
       insights: ['insightsTab','tabInsightsBtn']
     };
 
@@ -41,6 +45,11 @@ _tab_js = r"""
     } else if (which === 'miner') {
       if (typeof refreshMiner === 'function') refreshMiner();
       if (typeof refreshMinerLogs === 'function') refreshMinerLogs();
+    } else if (which === 'soup') {
+      if (typeof refreshSoup === 'function') refreshSoup();
+    } else if (which === 'pi') {
+      const f = document.getElementById('piFrame');
+      if (f && !f.src) f.src = piAgentUrl();
     } else if (which === 'insights') {
       if (typeof refreshInsights === 'function') refreshInsights();
     }
@@ -52,6 +61,8 @@ _tab_js = r"""
     const which = active && active.id === 'tabVllmBtn' ? 'vllm'
       : active && active.id === 'tabBenchsBtn' ? 'benchs'
       : active && active.id === 'tabMinerBtn' ? 'miner'
+      : active && active.id === 'tabSoupBtn' ? 'soup'
+      : active && active.id === 'tabPiBtn' ? 'pi'
       : active && active.id === 'tabInsightsBtn' ? 'insights'
       : 'monitor';
     window.showTopTab(which);
