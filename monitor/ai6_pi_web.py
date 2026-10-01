@@ -34,12 +34,13 @@ class ProviderCommand(BaseModel):
 class NodeCommand(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     monitor_url: str = Field(min_length=8, max_length=256)
+    disabled_gpus: list[int] = Field(default_factory=list)
 
 
 class NodeStartCommand(BaseModel):
     name: str
     model: str
-    gpus: list[int]
+    gpus: list[int] = Field(default_factory=list)
     split: str = "layer"
     ctx: int = 8192
     ngl: int = 999
@@ -212,7 +213,9 @@ def pi_node_add(cmd: NodeCommand):
     except Exception as e:
         raise base.HTTPException(status_code=409, detail=f"node test failed: {e}")
     items = [x for x in _load_nodes() if x.get("name") != cmd.name]
-    items.append({"name": cmd.name, "monitor_url": root})
+    old = next((x for x in _load_nodes() if x.get("name") == cmd.name), {})
+    items.append({"name": cmd.name, "monitor_url": root,
+                  "disabled_gpus": cmd.disabled_gpus if cmd.disabled_gpus else old.get("disabled_gpus", [])})
     _save_nodes(items)
     return {"ok": True, "host": stats.get("host", {}), "models": len(models),
             "gpus": len(stats.get("gpu", {}).get("devices", []))}
@@ -228,9 +231,30 @@ def pi_node_delete(name: str):
 def pi_node_start(cmd: NodeStartCommand):
     item = _node(cmd.name)
     root = item["monitor_url"].rstrip("/")
+    gpus = list(cmd.gpus)
+    if not gpus:
+        try:
+            stats = _json_request(root + "/api/stats", timeout=4)
+            disabled = set(int(x) for x in item.get("disabled_gpus", []))
+            devices = stats.get("gpu", {}).get("devices", [])
+            candidates = []
+            for g in devices:
+                idx = int(g.get("index", -1))
+                if idx < 0 or idx in disabled:
+                    continue
+                used = float(g.get("memory_used_mib") or 0)
+                total = float(g.get("memory_total_mib") or 0)
+                util = float(g.get("util_gpu_pct") or 0)
+                candidates.append((used / total if total else 1.0, util, idx))
+            if not candidates:
+                raise RuntimeError("no enabled GPUs available")
+            candidates.sort()
+            gpus = [candidates[0][2]]
+        except Exception as e:
+            raise base.HTTPException(status_code=409, detail=f"auto GPU selection failed: {e}")
     try:
         started = _json_request(root + "/api/workers/custom/start", "POST", {
-            "model": cmd.model, "gpus": cmd.gpus, "split": cmd.split,
+            "model": cmd.model, "gpus": gpus, "split": cmd.split,
             "ctx": cmd.ctx, "ngl": cmd.ngl, "port": None, "alias": cmd.alias,
         }, timeout=12)
     except Exception as e:
@@ -253,14 +277,15 @@ def pi_node_start(cmd: NodeStartCommand):
         return {"ok": True, "started": True, "ready": False, "port": port,
                 "worker_url": worker_url, "detail": last_error or "model still loading"}
     provider_name = f"{cmd.name}-{cmd.alias}-{port}"
-    items = [x for x in _load_providers() if x.get("name") != provider_name]
+    items = [x for x in _load_providers()
+             if x.get("base_url", "").rstrip("/") != worker_url.rstrip("/")]
     items.append({"name": provider_name, "base_url": worker_url,
                   "api_key": "ollama", "models": models, "managed_node": cmd.name,
                   "managed_port": port})
     _save_providers(items)
     _sync_pi_models()
     return {"ok": True, "started": True, "ready": True, "port": port,
-            "worker_url": worker_url, "provider": provider_name, "models": models}
+            "worker_url": worker_url, "provider": provider_name, "models": models, "gpus": gpus}
 
 
 @base.app.post("/api/pi/nodes/stop")
@@ -517,7 +542,8 @@ async function loadPiNodes(){
   piNodes.innerHTML=ns.length?ns.map(n=>{
    const gs=(n.gpus||[]).map(g=>'GPU'+g.index+' '+g.name+' '+Math.round(g.memory_total_mib||0)+'MiB').join(' • ');
    const opts=(n.models||[]).map(m=>'<option value="'+escPi(m.path)+'">'+escPi(m.label)+'</option>').join('');
-   const gpuChecks=(n.gpus||[]).map(g=>'<label><input type="checkbox" class="nodeGpu" data-node="'+encodeURIComponent(n.name)+'" value="'+g.index+'">GPU '+g.index+'</label>').join(' ');
+   const disabled=new Set((n.disabled_gpus||[]).map(Number));
+   const gpuChecks='<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpuAuto" data-node="'+encodeURIComponent(n.name)+'" value="auto" checked>Auto</label> '+(n.gpus||[]).map(g=>'<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpu" data-node="'+encodeURIComponent(n.name)+'" value="'+g.index+'" '+(disabled.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+(disabled.has(Number(g.index))?' (disabled)':'')+'</label>').join(' ');
    const workers=Object.entries(n.workers||{}).map(([p,w])=>'<span>'+p+' '+escPi(w.status_text||w.state||'')+(w.managed?'':' <button onclick="stopPiNodeWorker(\''+encodeURIComponent(n.name)+'\','+p+')">Stop</button>')+'</span>').join(' • ');
    return '<div class="pi-node"><b>'+escPi(n.name)+'</b> • '+(n.online?'🟢':'🔴')+' '+escPi(n.monitor_url)+'<div class="section-sub">'+escPi(gs)+(n.error?' • '+escPi(n.error):'')+'</div>'+(n.online?'<div class="pi-node-start"><select id="nodeModel_'+encodeURIComponent(n.name)+'">'+opts+'</select><span>'+gpuChecks+'</span><select id="nodeCtx_'+encodeURIComponent(n.name)+'"><option>8192</option><option>16384</option><option>32768</option></select><button onclick="startPiNodeWorker(\''+encodeURIComponent(n.name)+'\')">Start + attach</button><button onclick="deletePiNode(\''+encodeURIComponent(n.name)+'\')">Delete node</button></div><div class="section-sub">'+workers+'</div>':'')+'</div>';
   }).join(''):'No managed nodes configured.';
@@ -531,9 +557,9 @@ async function addPiNode(){
 async function deletePiNode(name){await fetch('/api/pi/nodes/'+name,{method:'DELETE'});loadPiNodes()}
 async function startPiNodeWorker(enc){
  const name=decodeURIComponent(enc), model=document.getElementById('nodeModel_'+enc).value,ctx=Number(document.getElementById('nodeCtx_'+enc).value);
- const gpus=[...document.querySelectorAll('.nodeGpu[data-node="'+enc+'"]:checked')].map(x=>Number(x.value));if(!gpus.length){alert('Select GPU');return}
+ const gpus=[...document.querySelectorAll('.nodeGpu[data-node="'+enc+'"]:checked')].map(x=>Number(x.value));
  piStatus.textContent='● Starting '+name+' worker…';piStatus.className='status loading';
- try{const r=await fetch('/api/pi/nodes/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,model,gpus,split:'layer',ctx,ngl:999,alias:'pi'})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiNodes();await loadPiWorkers();piStatus.textContent=d.ready?'● Remote worker ready • '+d.provider:'● Worker started on '+d.port+' • still loading';piStatus.className=d.ready?'status ready':'status loading'}catch(e){piStatus.textContent='● Remote start error: '+e.message;piStatus.className='status error'}
+ try{const r=await fetch('/api/pi/nodes/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,model,gpus,split:'layer',ctx,ngl:999,alias:'pi'})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiNodes();await loadPiWorkers();if(d.ready&&d.provider){const key='ai6-web-'+d.provider.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');const wanted=key+'::'+(d.models||[])[0];if([...piModel.options].some(x=>x.value===wanted))piModel.value=wanted}piStatus.textContent=d.ready?'● Remote worker ready • '+d.provider+' • GPU '+(d.gpus||[]).join(','):'● Worker started on '+d.port+' • still loading';piStatus.className=d.ready?'status ready':'status loading'}catch(e){piStatus.textContent='● Remote start error: '+e.message;piStatus.className='status error'}
 }
 async function stopPiNodeWorker(enc,port){
  const name=decodeURIComponent(enc);const r=await fetch('/api/pi/nodes/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,port})});const d=await r.json();if(!r.ok){alert(d.detail||JSON.stringify(d));return}await loadPiNodes();await loadPiWorkers()
