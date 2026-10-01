@@ -1,0 +1,13 @@
+[Unit]
+Description=CMP 40HX PCIe Gen2 bring-up
+After=systemd-modules-load.service nvidia-persistenced.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/local/sbin/cmp40hx-gen2
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
