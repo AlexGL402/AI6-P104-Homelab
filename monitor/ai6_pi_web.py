@@ -58,6 +58,16 @@ class NodeGpuPolicyCommand(BaseModel):
     allow_auto: bool
 
 
+class BenchRunCommand(BaseModel):
+    name: str
+    backend: str = "auto"
+    model: str
+    gpus: list[int] = Field(default_factory=list)
+    ctx: int = 4096
+    tokens: int = 256
+    split: str = "layer"
+
+
 class PiChatCommand(BaseModel):
     prompt: str = Field(min_length=1, max_length=12000)
     model: str = Field(default="8b", max_length=256)
@@ -369,6 +379,121 @@ def pi_benchmarks():
     return {"runs": _load_benchmarks()}
 
 
+@base.app.post("/api/pi/benchmark/run")
+def pi_benchmark_run(cmd: BenchRunCommand):
+    item = _node(cmd.name)
+    root = item["monitor_url"].rstrip("/")
+    parsed = urllib.parse.urlsplit(root)
+    hostroot = f"{parsed.scheme}://{parsed.hostname}"
+    backend = cmd.backend
+    model = cmd.model
+    if backend == "auto":
+        backend = "ollama" if model.startswith("ollama:") else "llama.cpp"
+    if model.startswith("ollama:"):
+        model = model[7:]
+    elif model.startswith("gguf:"):
+        model = model[5:]
+    if backend not in ("ollama", "llama.cpp"):
+        raise base.HTTPException(status_code=400, detail="Benchmark Runner currently supports Ollama and llama.cpp")
+    if not (2048 <= cmd.ctx <= 131072) or not (16 <= cmd.tokens <= 4096):
+        raise base.HTTPException(status_code=400, detail="invalid context/tokens")
+
+    prompt = ("Write a concise Python function that recursively finds the 10 largest files "
+              "under a directory, handles permission errors, and explain the complexity.")
+    port = None
+    used_gpus = list(cmd.gpus)
+    started_at = time.monotonic()
+    try:
+        if backend == "ollama":
+            url = hostroot + ":11434/api/generate"
+            result = _json_request(url, "POST", {
+                "model": model, "prompt": prompt, "stream": False,
+                "options": {"temperature": 0, "num_ctx": cmd.ctx, "num_predict": cmd.tokens},
+            }, timeout=600)
+            prompt_n = int(result.get("prompt_eval_count") or 0)
+            eval_n = int(result.get("eval_count") or 0)
+            pd = float(result.get("prompt_eval_duration") or 0) / 1e9
+            ed = float(result.get("eval_duration") or 0) / 1e9
+            prompt_tps = round(prompt_n / pd, 2) if pd else None
+            gen_tps = round(eval_n / ed, 2) if ed else None
+        else:
+            if not used_gpus:
+                stats0 = _json_request(root + "/api/stats", timeout=5)
+                disabled = set(int(x) for x in item.get("disabled_gpus", []))
+                candidates = []
+                for g in stats0.get("gpu", {}).get("devices", []):
+                    idx = int(g.get("index", -1))
+                    if idx < 0 or idx in disabled:
+                        continue
+                    total = float(g.get("memory_total_mib") or 0)
+                    used = float(g.get("memory_used_mib") or 0)
+                    candidates.append((used / total if total else 1.0, float(g.get("util_gpu_pct") or 0), idx))
+                if not candidates:
+                    raise RuntimeError("no enabled GPU available")
+                candidates.sort()
+                used_gpus = [candidates[0][2]]
+            started = _json_request(root + "/api/workers/custom/start", "POST", {
+                "model": model, "gpus": used_gpus, "split": cmd.split,
+                "ctx": cmd.ctx, "ngl": 999, "port": None, "alias": "bench",
+            }, timeout=15)
+            port = int(started["port"])
+            api = hostroot + f":{port}"
+            ready = False
+            for _ in range(120):
+                try:
+                    if _json_request(api + "/health", timeout=2).get("status") == "ok":
+                        ready = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            if not ready:
+                raise RuntimeError(f"worker {port} did not become ready")
+            result = _json_request(api + "/v1/completions", "POST", {
+                "model": "bench", "prompt": prompt, "temperature": 0,
+                "max_tokens": cmd.tokens,
+            }, timeout=600)
+            timings = result.get("timings") or {}
+            prompt_n = int(timings.get("prompt_n") or (result.get("usage") or {}).get("prompt_tokens") or 0)
+            eval_n = int(timings.get("predicted_n") or (result.get("usage") or {}).get("completion_tokens") or 0)
+            prompt_tps = timings.get("prompt_per_second")
+            gen_tps = timings.get("predicted_per_second")
+
+        stats = _json_request(root + "/api/stats", timeout=5)
+        devices = stats.get("gpu", {}).get("devices", [])
+        chosen = devices if not used_gpus else [g for g in devices if int(g.get("index", -1)) in used_gpus]
+        row = {
+            "ts": int(time.time()), "kind": "model-bench", "node": cmd.name,
+            "backend": backend, "model": model, "gpus": used_gpus,
+            "ctx": cmd.ctx, "tokens": cmd.tokens, "prompt_tokens": prompt_n,
+            "output": eval_n, "prompt_tps": round(float(prompt_tps), 2) if prompt_tps is not None else None,
+            "gen_tps": round(float(gen_tps), 2) if gen_tps is not None else None,
+            "elapsed_s": round(time.monotonic() - started_at, 2),
+            "gpu": [{
+                "index": g.get("index"), "name": g.get("name"),
+                "memory_used_mib": g.get("memory_used_mib"),
+                "power_w": g.get("power_w"), "temp_c": g.get("temp_c"),
+            } for g in chosen],
+        }
+        _append_benchmark(row)
+        return {"ok": True, "run": row}
+    except base.HTTPException:
+        raise
+    except Exception as e:
+        row = {"ts": int(time.time()), "kind": "model-bench", "node": cmd.name,
+               "backend": backend, "model": model, "gpus": used_gpus,
+               "ctx": cmd.ctx, "tokens": cmd.tokens, "error": str(e),
+               "elapsed_s": round(time.monotonic() - started_at, 2)}
+        _append_benchmark(row)
+        raise base.HTTPException(status_code=409, detail=str(e))
+    finally:
+        if port is not None:
+            try:
+                _json_request(root + "/api/workers/custom/stop", "POST", {"port": port}, timeout=10)
+            except Exception:
+                pass
+
+
 @base.app.post("/api/pi/chat")
 def pi_chat(cmd: PiChatCommand):
     if not PI.is_file():
@@ -529,7 +654,20 @@ def install():
       </div>
       <div id="piWorkers" class="section-sub"></div>
     </div>
-    <div class="pi-bench-head"><b>Recent agent runs</b><button onclick="loadPiBench()">Refresh</button></div>
+    <div class="pi-bench-runner">
+      <b>Benchmark Runner</b>
+      <div class="pi-bench-controls">
+        <label>Node<select id="benchNode" onchange="benchNodeChanged()"></select></label>
+        <label>Backend<select id="benchBackend" onchange="benchNodeChanged()"><option value="auto">Auto</option><option value="llama.cpp">llama.cpp</option><option value="ollama">Ollama</option><option value="vllm">vLLM</option></select></label>
+        <label>Model<select id="benchModel"></select></label>
+        <label>GPU<select id="benchGpu"></select></label>
+        <label>Context<select id="benchCtx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select></label>
+        <label>Tokens<select id="benchTokens"><option>128</option><option selected>256</option><option>512</option></select></label>
+        <button id="benchRunBtn" onclick="runModelBench()">▶ Run benchmark</button>
+      </div>
+      <div id="benchRunStatus" class="section-sub"></div>
+    </div>
+    <div class="pi-bench-head"><b>Recent runs</b><button onclick="loadPiBench()">Refresh</button></div>
     <div id="piBench" class="pi-bench"></div>
     <div id="piChat" class="pi-chat">
       <div class="pi-empty">Pi Coder is ready. Ask it to inspect, edit or test this repository.</div>
@@ -547,7 +685,7 @@ def install():
     dashboard = dashboard.replace(old, new, 1)
     dashboard = dashboard.replace(
         "</style></head><body>",
-        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}.pi-node{padding:8px 0;border-bottom:1px solid #292929}.pi-node-start{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:6px}.pi-node-start select{max-width:420px;padding:5px}.pi-gpu-policies{display:flex;gap:10px;flex-wrap:wrap;margin:5px 0;font-size:11px}.pi-gpu-policy{color:#bbb}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
+        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-runner{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-bench-controls{display:flex;gap:7px;align-items:end;flex-wrap:wrap;margin-top:7px}.pi-bench-controls label{font-size:10px;color:#aaa}.pi-bench-controls select{display:block;margin-top:3px;max-width:330px;padding:6px}.pi-bench-controls button{padding:7px 10px}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}.pi-node{padding:8px 0;border-bottom:1px solid #292929}.pi-node-start{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:6px}.pi-node-start select{max-width:420px;padding:5px}.pi-gpu-policies{display:flex;gap:10px;flex-wrap:wrap;margin:5px 0;font-size:11px}.pi-gpu-policy{color:#bbb}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
 </style></head><body>''',
         1,
     )
@@ -562,12 +700,32 @@ function renderPi(){
  box.innerHTML=piHistory.map(m=>'<div class="pi-msg '+(m.role==='user'?'pi-user':'pi-assistant')+'">'+escPi(m.content)+(m.meta?'<div class="pi-meta">'+escPi(m.meta)+'</div>':'')+'</div>').join('');
  box.scrollTop=box.scrollHeight;
 }
+let piNodeCache=[];
 async function loadPiBench(){
  try{
   const r=await fetch('/api/pi/benchmarks');const d=await r.json();const rows=d.runs||[];
   if(!rows.length){piBench.innerHTML='<span class="muted">No saved runs yet.</span>';return}
-  piBench.innerHTML='<table><thead><tr><th>Model / worker</th><th>Total</th><th>Tool</th><th>LLM+overhead</th><th>In</th><th>Out</th><th>Agent tok/s</th><th>Tools</th></tr></thead><tbody>'+rows.slice(0,12).map(x=>'<tr><td>'+escPi(x.label)+'</td><td>'+x.elapsed_s+'s</td><td>'+x.tool_time_s+'s</td><td>'+x.llm_plus_overhead_s+'s</td><td>'+x.input+'</td><td>'+x.output+'</td><td>'+(x.agent_tok_s??'—')+'</td><td>'+x.tool_calls+'</td></tr>').join('')+'</tbody></table>';
+  const shown=rows.slice(0,7);
+  piBench.innerHTML='<div style="max-height:255px;overflow:auto"><table><thead><tr><th>Node</th><th>Backend</th><th>Model</th><th>GPU</th><th>Prompt tok/s</th><th>Gen tok/s</th><th>VRAM</th><th>W</th><th>Temp</th><th>Total</th></tr></thead><tbody>'+shown.map(x=>{if(x.kind==='model-bench'){const gs=x.gpu||[];return '<tr><td>'+escPi(x.node)+'</td><td>'+escPi(x.backend)+'</td><td title="'+escPi(x.model)+'">'+escPi(String(x.model||'').split('/').pop())+'</td><td>'+escPi((x.gpus||[]).length?(x.gpus||[]).join('+'):'auto')+'</td><td>'+(x.prompt_tps??'—')+'</td><td>'+(x.gen_tps??(x.error?'ERR':'—'))+'</td><td>'+escPi(gs.map(g=>Math.round(g.memory_used_mib||0)+'M').join('+')||'—')+'</td><td>'+escPi(gs.map(g=>g.power_w??'—').join('+')||'—')+'</td><td>'+escPi(gs.map(g=>g.temp_c??'—').join('+')||'—')+'</td><td>'+(x.elapsed_s??'—')+'s</td></tr>'}return '<tr><td>Pi</td><td>agent</td><td>'+escPi(x.label)+'</td><td>—</td><td>—</td><td>'+(x.agent_tok_s??'—')+'</td><td>—</td><td>—</td><td>—</td><td>'+x.elapsed_s+'s</td>'}).join('')+'</tbody></table></div><div class="section-sub">Showing latest 7 of '+rows.length+' runs • scroll inside table</div>';
  }catch(e){piBench.textContent='Benchmark history error: '+e.message}
+}
+async function loadBenchNodes(){
+ try{const d=await (await fetch('/api/pi/nodes')).json();piNodeCache=d.nodes||[];benchNode.innerHTML=piNodeCache.map(n=>'<option value="'+encodeURIComponent(n.name)+'">'+escPi(n.name)+'</option>').join('');benchNodeChanged()}catch(e){benchRunStatus.textContent='Node list error: '+e.message}
+}
+function benchNodeChanged(){
+ const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n)return;
+ const backend=benchBackend.value;let ms=[];
+ if(backend==='auto'||backend==='llama.cpp')ms.push(...(n.models||[]).map(m=>({v:'gguf:'+m.path,t:'GGUF • '+m.label})));
+ if(backend==='auto'||backend==='ollama')ms.push(...(n.ollama_models||[]).map(m=>({v:'ollama:'+m,t:'Ollama • '+m})));
+ benchModel.innerHTML=ms.map(m=>'<option value="'+escPi(m.v)+'">'+escPi(m.t)+'</option>').join('');
+ const dis=new Set((n.disabled_gpus||[]).map(Number));benchGpu.innerHTML='<option value="auto">Auto</option>'+((n.gpus||[]).map(g=>'<option value="'+g.index+'" '+(dis.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+' • '+escPi(g.name)+'</option>').join(''))+((n.gpus||[]).length>1?'<option value="all">All enabled GPUs</option>':'');
+}
+async function runModelBench(){
+ const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n||!benchModel.value)return;
+ let gpus=[];if(benchGpu.value==='all'){const dis=new Set((n.disabled_gpus||[]).map(Number));gpus=(n.gpus||[]).map(g=>Number(g.index)).filter(x=>!dis.has(x))}else if(benchGpu.value!=='auto')gpus=[Number(benchGpu.value)];
+ const payload={name:n.name,backend:benchBackend.value,model:benchModel.value,gpus,ctx:Number(benchCtx.value),tokens:Number(benchTokens.value),split:'layer'};
+ benchRunBtn.disabled=true;benchRunStatus.textContent='Running '+n.name+' • '+benchModel.options[benchModel.selectedIndex].text+'…';
+ try{const r=await fetch('/api/pi/benchmark/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));const x=d.run;benchRunStatus.textContent='Done • prompt '+(x.prompt_tps??'—')+' tok/s • gen '+(x.gen_tps??'—')+' tok/s • '+x.elapsed_s+'s';await loadPiBench();await loadPiNodes()}catch(e){benchRunStatus.textContent='ERROR: '+e.message;await loadPiBench()}finally{benchRunBtn.disabled=false}
 }
 async function loadPiNodes(){
  try{
@@ -643,7 +801,7 @@ async function sendPi(){
 }
 function clearPiChat(){piHistory=[];renderPi();document.getElementById('piPrompt').focus()}
 function openPiTerminal(){window.open(location.protocol+'//'+location.hostname+':8093/','_blank','noopener')}
-window.addEventListener('load',()=>{const p=document.getElementById('piPrompt');if(p)p.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();sendPi()}});refreshPiStatus();loadPiWorkers();loadPiNodes();loadPiBench()});
+window.addEventListener('load',()=>{const p=document.getElementById('piPrompt');if(p)p.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();sendPi()}});refreshPiStatus();loadPiWorkers();loadPiNodes();loadBenchNodes();loadPiBench()});
 </script>
 '''
     dashboard = dashboard.replace("</body>", js + "\n</body>", 1)
