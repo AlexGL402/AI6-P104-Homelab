@@ -217,10 +217,25 @@ def pi_nodes():
                 ollama_models = _discover_models(ollama_url, "ollama")
             except Exception:
                 pass
+            workers = stats.get("llama", {}).get("workers", {})
+            # Bench/Managed Node model discovery must also include models that are
+            # already running. A worker can use a GGUF outside /api/models' scan
+            # path, so relying on /api/models alone leaves the selector empty.
+            known_paths = {str(m.get("path")) for m in models if m.get("path")}
+            running_models = []
+            for port, worker in workers.items():
+                mid = str((worker or {}).get("model") or "").strip()
+                if not mid:
+                    continue
+                running_models.append({"label": f"running:{port} • {Path(mid).name}", "path": mid})
+                if mid not in known_paths and (mid.endswith(".gguf") or mid.startswith("/")):
+                    models.append({"label": f"running:{port} • {Path(mid).name}", "path": mid})
+                    known_paths.add(mid)
             row.update({"online": True, "host": stats.get("host", {}),
                         "gpus": stats.get("gpu", {}).get("devices", []),
-                        "workers": stats.get("llama", {}).get("workers", {}),
-                        "models": models, "ollama_models": ollama_models})
+                        "workers": workers,
+                        "models": models, "running_models": running_models,
+                        "ollama_models": ollama_models})
         except Exception as e:
             row.update({"online": False, "error": str(e), "gpus": [], "workers": {}, "models": []})
         out.append(row)
@@ -729,7 +744,7 @@ async function loadBenchNodes(){
 function benchNodeChanged(){
  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n)return;
  const backend=benchBackend.value;let ms=[];
- if(backend==='auto'||backend==='llama.cpp')ms.push(...(n.models||[]).map(m=>({v:'gguf:'+m.path,t:'GGUF • '+m.label})));
+ if(backend==='auto'||backend==='llama.cpp'){const seen=new Set();ms.push(...[...(n.models||[]),...(n.running_models||[])].filter(m=>m&&m.path&&!seen.has(m.path)&&seen.add(m.path)).map(m=>({v:'gguf:'+m.path,t:'GGUF • '+(m.label||String(m.path).split('/').pop())})))};
  if(backend==='auto'||backend==='ollama')ms.push(...(n.ollama_models||[]).map(m=>({v:'ollama:'+m,t:'Ollama • '+m})));
  benchModel.innerHTML=ms.map(m=>'<option value="'+escPi(m.v)+'">'+escPi(m.t)+'</option>').join('');
  const dis=new Set((n.disabled_gpus||[]).map(Number));benchGpu.innerHTML='<option value="auto">Auto</option>'+((n.gpus||[]).map(g=>'<option value="'+g.index+'" '+(dis.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+' • '+escPi(g.name)+'</option>').join(''))+((n.gpus||[]).length>1?'<option value="all">All enabled GPUs</option>':'');
@@ -748,7 +763,8 @@ async function loadPiNodes(){
    const disabled=new Set((n.disabled_gpus||[]).map(Number));
    const gs=(n.gpus||[]).map(g=>'GPU'+g.index+' '+g.name+' '+Math.round(g.memory_total_mib||0)+'MiB').join(' • ');
    const policies=(n.gpus||[]).map(g=>'<label class="pi-gpu-policy"><input type="checkbox" '+(!disabled.has(Number(g.index))?'checked':'')+' onchange="setPiGpuPolicy(\''+encodeURIComponent(n.name)+'\','+g.index+',this.checked)"> GPU '+g.index+' Auto</label>').join(' ');
-   const ggufOpts=(n.models||[]).map(m=>'<option value="gguf:'+escPi(m.path)+'">GGUF • '+escPi(m.label)+'</option>').join('');
+   const seen=new Set();const allModels=[...(n.models||[]),...(n.running_models||[])].filter(m=>m&&m.path&&!seen.has(m.path)&&seen.add(m.path));
+   const ggufOpts=allModels.map(m=>'<option value="gguf:'+escPi(m.path)+'">GGUF • '+escPi(m.label||String(m.path).split('/').pop())+'</option>').join('');
    const ollamaOpts=(n.ollama_models||[]).map(m=>'<option value="ollama:'+escPi(m)+'">Ollama • '+escPi(m)+'</option>').join('');
    const opts=ggufOpts+ollamaOpts;
    const gpuChecks='<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpuAuto" data-node="'+encodeURIComponent(n.name)+'" value="auto" checked>Auto</label> '+(n.gpus||[]).map(g=>'<label><input type="radio" name="nodeGpu_'+encodeURIComponent(n.name)+'" class="nodeGpu" data-node="'+encodeURIComponent(n.name)+'" value="'+g.index+'" '+(disabled.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+(disabled.has(Number(g.index))?' (disabled)':'')+'</label>').join(' ');
