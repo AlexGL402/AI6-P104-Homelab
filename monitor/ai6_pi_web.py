@@ -747,14 +747,16 @@ async function loadBenchNodes(){
  }catch(e){benchRunStatus.textContent='Node list error: '+e.message}
 }
 async function benchNodeChanged(){
- const nodeSel=document.getElementById('benchNode'),modelSel0=document.getElementById('benchModel'),gpuSel0=document.getElementById('benchGpu');
- const nodeValue=nodeSel.value;
- modelSel0.innerHTML='<option value="">Loading models…</option>';gpuSel0.innerHTML='<option value="auto">Loading GPUs…</option>';
+ const nodeEl=document.querySelector('select#benchNode'),modelEl=document.querySelector('select#benchModel'),gpuEl=document.querySelector('select#benchGpu'),statusEl=document.querySelector('#benchRunStatus');
+ const nodeValue=nodeEl?nodeEl.value:'';
+ if(modelEl)modelEl.innerHTML='<option value="">Loading models…</option>';
+ if(gpuEl)gpuEl.innerHTML='<option value="auto">Loading GPUs…</option>';
  try{
   const d=await (await fetch('/api/pi/nodes?ts='+Date.now(),{cache:'no-store'})).json();
   piNodeCache=d.nodes||[];
-  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===nodeValue);if(!n){benchModel.innerHTML='<option value="">No node data</option>';return}
-  const backend=benchBackend.value,ms=[],seen=new Set();
+  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===nodeValue);
+  if(!n)throw new Error('No node data for '+nodeValue);
+  const backend=document.querySelector('select#benchBackend').value,ms=[],seen=new Set();
   if(backend==='auto'||backend==='llama.cpp'){
    for(const m of [...(n.models||[]),...(n.running_models||[])]){
     if(!m||!m.path||seen.has('g:'+m.path))continue;seen.add('g:'+m.path);
@@ -764,22 +766,17 @@ async function benchNodeChanged(){
   if(backend==='auto'||backend==='ollama'){
    for(const m of (n.ollama_models||[])){if(!m||seen.has('o:'+m))continue;seen.add('o:'+m);ms.push({v:'ollama:'+m,t:'Ollama • '+m})}
   }
-  // Do not HTML-escape option values/text while constructing DOM with innerHTML:
-  // escPi is for chat rendering and was turning model paths into markup/empty options
-  // in some browsers. Build real Option nodes instead.
-  const modelSel=document.getElementById('benchModel'),gpuSel=document.getElementById('benchGpu');
-  modelSel.options.length=0;
-  if(ms.length){
-   for(const m of ms){const o=document.createElement('option');o.value=m.v;o.text=m.t;modelSel.add(o)}
-  }else{
-   const o=document.createElement('option');o.value='';o.text='No models discovered';modelSel.add(o);
-  }
+  if(!modelEl||!gpuEl)throw new Error('Bench select elements not found');
+  while(modelEl.firstChild)modelEl.removeChild(modelEl.firstChild);
+  const addOpt=(sel,value,label,disabled=false)=>{const o=document.createElement('option');o.setAttribute('value',value);o.appendChild(document.createTextNode(label));o.disabled=disabled;sel.appendChild(o)};
+  if(ms.length)for(const m of ms)addOpt(modelEl,m.v,m.t);else addOpt(modelEl,'','No models discovered');
+  while(gpuEl.firstChild)gpuEl.removeChild(gpuEl.firstChild);
+  addOpt(gpuEl,'auto','Auto');
   const dis=new Set((n.disabled_gpus||[]).map(Number));
-  gpuSel.options.length=0;let go=document.createElement('option');go.value='auto';go.text='Auto';gpuSel.add(go);
-  for(const g of (n.gpus||[])){go=document.createElement('option');go.value=String(g.index);go.text='GPU '+g.index+' • '+String(g.name||'');go.disabled=dis.has(Number(g.index));gpuSel.add(go)}
-  if((n.gpus||[]).length>1){go=document.createElement('option');go.value='all';go.text='All enabled GPUs';gpuSel.add(go)}
-  benchRunStatus.textContent='Discovered: '+(n.models||[]).length+' GGUF • '+(n.running_models||[]).length+' running • '+(n.ollama_models||[]).length+' Ollama';
- }catch(e){document.getElementById('benchModel').innerHTML='<option value="">Discovery error</option>';document.getElementById('benchGpu').innerHTML='<option value="auto">Auto</option>';document.getElementById('benchRunStatus').textContent='Discovery ERROR: '+e.message}
+  for(const g of (n.gpus||[]))addOpt(gpuEl,String(g.index),'GPU '+g.index+' • '+String(g.name||''),dis.has(Number(g.index)));
+  if((n.gpus||[]).length>1)addOpt(gpuEl,'all','All enabled GPUs');
+  statusEl.textContent='Discovered: '+(n.models||[]).length+' GGUF • '+(n.running_models||[]).length+' running • '+(n.ollama_models||[]).length+' Ollama';
+ }catch(e){if(modelEl)modelEl.innerHTML='<option value="">Discovery error</option>';if(gpuEl)gpuEl.innerHTML='<option value="auto">Auto</option>';if(statusEl)statusEl.textContent='Discovery ERROR: '+e.message}
 }
 async function runModelBench(){
  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n||!benchModel.value)return;
