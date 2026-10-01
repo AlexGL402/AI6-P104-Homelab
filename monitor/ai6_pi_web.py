@@ -67,7 +67,8 @@ def _sync_pi_models():
     except Exception:
         data = {}
     for item in _load_providers():
-        data[_provider_key(item["name"])] = {
+        key = _provider_key(item["name"])
+        data.setdefault("providers", {})[key] = {
             "api": "openai-completions",
             "baseUrl": item["base_url"].rstrip("/"),
             "apiKey": item.get("api_key") or "ollama",
