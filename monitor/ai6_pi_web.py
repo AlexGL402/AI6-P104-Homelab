@@ -16,6 +16,7 @@ base = dynamic.base
 REPO = Path.home() / "AI6-P104-Homelab"
 PI = Path("/usr/bin/pi")
 PROVIDERS_FILE = Path.home() / ".local/state/ai6-monitor/pi-providers.json"
+BENCH_FILE = Path.home() / ".local/state/ai6-monitor/pi-benchmarks.jsonl"
 MODELS = {
     "8b": ("ai6-ollama", "qwen3:8b", "Qwen3 8B"),
     "14b": ("ai6-ollama", "qwen3:14b", "Qwen3 14B"),
@@ -80,6 +81,20 @@ def _sync_pi_models():
         }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def _append_benchmark(row):
+    BENCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with BENCH_FILE.open("a") as fp:
+        fp.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _load_benchmarks(limit=30):
+    try:
+        rows = [json.loads(x) for x in BENCH_FILE.read_text().splitlines() if x.strip()]
+        return rows[-limit:][::-1]
+    except Exception:
+        return []
 
 
 def _history_prompt(history, prompt):
@@ -148,6 +163,11 @@ def pi_provider_delete(name: str):
     return {"ok": True}
 
 
+@base.app.get("/api/pi/benchmarks")
+def pi_benchmarks():
+    return {"runs": _load_benchmarks()}
+
+
 @base.app.post("/api/pi/chat")
 def pi_chat(cmd: PiChatCommand):
     if not PI.is_file():
@@ -194,6 +214,8 @@ def pi_chat(cmd: PiChatCommand):
     response_parts = []
     usage = {}
     tool_calls = 0
+    tool_started = {}
+    tool_time_s = 0.0
     for line in (p.stdout or "").splitlines():
         try:
             event = json.loads(line)
@@ -211,11 +233,26 @@ def pi_chat(cmd: PiChatCommand):
                         response_parts.append(part["text"])
         if event.get("type") == "tool_execution_start":
             tool_calls += 1
+            key = str(event.get("toolCallId") or event.get("id") or tool_calls)
+            tool_started[key] = time.monotonic()
+        if event.get("type") in ("tool_execution_end", "tool_execution_result"):
+            key = str(event.get("toolCallId") or event.get("id") or "")
+            if key in tool_started:
+                tool_time_s += time.monotonic() - tool_started.pop(key)
 
     response = response_parts[-1] if response_parts else "(no assistant text)"
     inp = usage.get("input") or usage.get("inputTokens") or usage.get("promptTokens") or 0
     out = usage.get("output") or usage.get("outputTokens") or usage.get("completionTokens") or 0
     total = usage.get("totalTokens") or ((inp or 0) + (out or 0))
+    agent_tok_s = round(out / elapsed, 2) if out and elapsed else None
+    row = {
+        "ts": int(time.time()), "label": label, "model": model_id,
+        "elapsed_s": elapsed, "tool_time_s": round(tool_time_s, 2),
+        "llm_plus_overhead_s": round(max(0.0, elapsed - tool_time_s), 2),
+        "input": inp, "output": out, "agent_tok_s": agent_tok_s,
+        "tool_calls": tool_calls,
+    }
+    _append_benchmark(row)
     return {
         "ok": True,
         "model": model_id,
@@ -223,8 +260,10 @@ def pi_chat(cmd: PiChatCommand):
         "elapsed_s": elapsed,
         "response": response.strip(),
         "usage": {"input": inp, "output": out, "total": total},
-        "avg_output_tok_s": round(out / elapsed, 2) if out and elapsed else None,
+        "avg_output_tok_s": agent_tok_s,
         "tool_calls": tool_calls,
+        "tool_time_s": row["tool_time_s"],
+        "llm_plus_overhead_s": row["llm_plus_overhead_s"],
         "stderr": (p.stderr or "").strip()[-2000:],
     }
 
@@ -281,6 +320,8 @@ def install():
       </div>
       <div id="piWorkers" class="section-sub"></div>
     </div>
+    <div class="pi-bench-head"><b>Recent agent runs</b><button onclick="loadPiBench()">Refresh</button></div>
+    <div id="piBench" class="pi-bench"></div>
     <div id="piChat" class="pi-chat">
       <div class="pi-empty">Pi Coder is ready. Ask it to inspect, edit or test this repository.</div>
     </div>
@@ -297,7 +338,7 @@ def install():
     dashboard = dashboard.replace(old, new, 1)
     dashboard = dashboard.replace(
         "</style></head><body>",
-        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
+        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
 </style></head><body>''',
         1,
     )
@@ -311,6 +352,13 @@ function renderPi(){
  if(!piHistory.length){box.innerHTML='<div class="pi-empty">Pi Coder is ready. Ask it to inspect, edit or test this repository.</div>';return}
  box.innerHTML=piHistory.map(m=>'<div class="pi-msg '+(m.role==='user'?'pi-user':'pi-assistant')+'">'+escPi(m.content)+(m.meta?'<div class="pi-meta">'+escPi(m.meta)+'</div>':'')+'</div>').join('');
  box.scrollTop=box.scrollHeight;
+}
+async function loadPiBench(){
+ try{
+  const r=await fetch('/api/pi/benchmarks');const d=await r.json();const rows=d.runs||[];
+  if(!rows.length){piBench.innerHTML='<span class="muted">No saved runs yet.</span>';return}
+  piBench.innerHTML='<table><thead><tr><th>Model / worker</th><th>Total</th><th>Tool</th><th>LLM+overhead</th><th>In</th><th>Out</th><th>Agent tok/s</th><th>Tools</th></tr></thead><tbody>'+rows.slice(0,12).map(x=>'<tr><td>'+escPi(x.label)+'</td><td>'+x.elapsed_s+'s</td><td>'+x.tool_time_s+'s</td><td>'+x.llm_plus_overhead_s+'s</td><td>'+x.input+'</td><td>'+x.output+'</td><td>'+(x.agent_tok_s??'—')+'</td><td>'+x.tool_calls+'</td></tr>').join('')+'</tbody></table>';
+ }catch(e){piBench.textContent='Benchmark history error: '+e.message}
 }
 async function loadPiWorkers(){
  try{
@@ -337,13 +385,13 @@ async function sendPi(){
  piHistory.push({role:'user',content:prompt});renderPi();input.value='';btn.disabled=true;piStatus.textContent='● Pi working…';piStatus.className='status loading';
  try{
   const r=await fetch('/api/pi/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,model,history:prior})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  const u=d.usage||{};const speed=d.avg_output_tok_s!=null?d.avg_output_tok_s+' agent tok/s':'tok/s —';const toks=(u.input||0)+' in / '+(u.output||0)+' out';const tools=(d.tool_calls||0)+' tools';piHistory.push({role:'assistant',content:d.response||'(no text)',meta:d.label+' • '+d.elapsed_s+' s • '+toks+' • '+speed+' • '+tools});renderPi();piStatus.textContent='● Pi ready • '+d.label+' • '+toks+' • '+speed;piStatus.className='status ready';
+  const u=d.usage||{};const speed=d.avg_output_tok_s!=null?d.avg_output_tok_s+' agent tok/s':'tok/s —';const toks=(u.input||0)+' in / '+(u.output||0)+' out';const tools=(d.tool_calls||0)+' tools';piHistory.push({role:'assistant',content:d.response||'(no text)',meta:d.label+' • '+d.elapsed_s+' s • tools '+(d.tool_time_s??0)+' s • LLM+overhead '+(d.llm_plus_overhead_s??d.elapsed_s)+' s • '+toks+' • '+speed+' • '+tools});renderPi();loadPiBench();piStatus.textContent='● Pi ready • '+d.label+' • '+toks+' • '+speed;piStatus.className='status ready';
  }catch(e){piHistory.push({role:'assistant',content:'ERROR: '+e.message,meta:'request failed'});renderPi();piStatus.textContent='● Pi error';piStatus.className='status error'}
  finally{btn.disabled=false;input.focus()}
 }
 function clearPiChat(){piHistory=[];renderPi();document.getElementById('piPrompt').focus()}
 function openPiTerminal(){window.open(location.protocol+'//'+location.hostname+':8093/','_blank','noopener')}
-window.addEventListener('load',()=>{const p=document.getElementById('piPrompt');if(p)p.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();sendPi()}});refreshPiStatus();loadPiWorkers()});
+window.addEventListener('load',()=>{const p=document.getElementById('piPrompt');if(p)p.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();sendPi()}});refreshPiStatus();loadPiWorkers();loadPiBench()});
 </script>
 '''
     dashboard = dashboard.replace("</body>", js + "\n</body>", 1)
