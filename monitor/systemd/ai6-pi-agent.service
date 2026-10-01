@@ -1,0 +1,22 @@
+[Unit]
+Description=AI6 Pi Coder Agent Web Terminal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai6
+Group=ai6
+WorkingDirectory=/home/ai6/AI6-P104-Homelab
+Environment=HOME=/home/ai6
+ExecStart=/usr/bin/ttyd \
+  --interface 0.0.0.0 \
+  --port 8093 \
+  --writable \
+  \
+  /bin/bash -lc 'cd /home/ai6/AI6-P104-Homelab && exec /usr/bin/pi'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
