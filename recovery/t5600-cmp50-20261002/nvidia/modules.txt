@@ -1,0 +1,3 @@
+nvidia_uvm           2043904  0
+nvidia              16498688  1 nvidia_uvm
+ecc                    45056  1 nvidia

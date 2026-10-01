@@ -1,0 +1,13 @@
+# /etc/systemd/system/cmp50hx-gen2.service
+[Unit]
+Description=CMP 50HX PCIe Gen2 unlock and auto-retrain (direct BAR0 policy)
+Documentation=https://github.com/xrip/cmp50hx-unlock
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cmp50hx-gen2
+# the oneshot deliberately loops for minutes; give it room beyond TIMEOUT_MIN
+TimeoutStartSec=25min
+
+[Install]
+WantedBy=multi-user.target
