@@ -739,15 +739,35 @@ async function loadPiBench(){
  }catch(e){piBench.textContent='Benchmark history error: '+e.message}
 }
 async function loadBenchNodes(){
- try{const d=await (await fetch('/api/pi/nodes')).json();piNodeCache=d.nodes||[];benchNode.innerHTML=piNodeCache.map(n=>'<option value="'+encodeURIComponent(n.name)+'">'+escPi(n.name)+'</option>').join('');benchNodeChanged()}catch(e){benchRunStatus.textContent='Node list error: '+e.message}
+ try{
+  const d=await (await fetch('/api/pi/nodes?ts='+Date.now(),{cache:'no-store'})).json();
+  piNodeCache=d.nodes||[];
+  benchNode.innerHTML=piNodeCache.map(n=>'<option value="'+encodeURIComponent(n.name)+'">'+escPi(n.name)+'</option>').join('');
+  await benchNodeChanged();
+ }catch(e){benchRunStatus.textContent='Node list error: '+e.message}
 }
-function benchNodeChanged(){
- const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n)return;
- const backend=benchBackend.value;let ms=[];
- if(backend==='auto'||backend==='llama.cpp'){const seen=new Set();ms.push(...[...(n.models||[]),...(n.running_models||[])].filter(m=>m&&m.path&&!seen.has(m.path)&&seen.add(m.path)).map(m=>({v:'gguf:'+m.path,t:'GGUF • '+(m.label||String(m.path).split('/').pop())})))};
- if(backend==='auto'||backend==='ollama')ms.push(...(n.ollama_models||[]).map(m=>({v:'ollama:'+m,t:'Ollama • '+m})));
- benchModel.innerHTML=ms.map(m=>'<option value="'+escPi(m.v)+'">'+escPi(m.t)+'</option>').join('');
- const dis=new Set((n.disabled_gpus||[]).map(Number));benchGpu.innerHTML='<option value="auto">Auto</option>'+((n.gpus||[]).map(g=>'<option value="'+g.index+'" '+(dis.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+' • '+escPi(g.name)+'</option>').join(''))+((n.gpus||[]).length>1?'<option value="all">All enabled GPUs</option>':'');
+async function benchNodeChanged(){
+ const nodeValue=benchNode.value;
+ benchModel.innerHTML='<option value="">Loading models…</option>';benchGpu.innerHTML='<option value="auto">Loading GPUs…</option>';
+ try{
+  const d=await (await fetch('/api/pi/nodes?ts='+Date.now(),{cache:'no-store'})).json();
+  piNodeCache=d.nodes||[];
+  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===nodeValue);if(!n){benchModel.innerHTML='<option value="">No node data</option>';return}
+  const backend=benchBackend.value,ms=[],seen=new Set();
+  if(backend==='auto'||backend==='llama.cpp'){
+   for(const m of [...(n.models||[]),...(n.running_models||[])]){
+    if(!m||!m.path||seen.has('g:'+m.path))continue;seen.add('g:'+m.path);
+    ms.push({v:'gguf:'+m.path,t:'GGUF • '+(m.label||String(m.path).split('/').pop())});
+   }
+  }
+  if(backend==='auto'||backend==='ollama'){
+   for(const m of (n.ollama_models||[])){if(!m||seen.has('o:'+m))continue;seen.add('o:'+m);ms.push({v:'ollama:'+m,t:'Ollama • '+m})}
+  }
+  benchModel.innerHTML=ms.length?ms.map(m=>'<option value="'+escPi(m.v)+'">'+escPi(m.t)+'</option>').join(''):'<option value="">No models discovered</option>';
+  const dis=new Set((n.disabled_gpus||[]).map(Number));
+  benchGpu.innerHTML='<option value="auto">Auto</option>'+((n.gpus||[]).map(g=>'<option value="'+g.index+'" '+(dis.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+' • '+escPi(g.name)+'</option>').join(''))+((n.gpus||[]).length>1?'<option value="all">All enabled GPUs</option>':'');
+  benchRunStatus.textContent='Discovered: '+(n.models||[]).length+' GGUF • '+(n.running_models||[]).length+' running • '+(n.ollama_models||[]).length+' Ollama';
+ }catch(e){benchModel.innerHTML='<option value="">Discovery error</option>';benchGpu.innerHTML='<option value="auto">Auto</option>';benchRunStatus.textContent='Discovery ERROR: '+e.message}
 }
 async function runModelBench(){
  const n=piNodeCache.find(x=>encodeURIComponent(x.name)===benchNode.value);if(!n||!benchModel.value)return;
