@@ -763,9 +763,19 @@ async function benchNodeChanged(){
   if(backend==='auto'||backend==='ollama'){
    for(const m of (n.ollama_models||[])){if(!m||seen.has('o:'+m))continue;seen.add('o:'+m);ms.push({v:'ollama:'+m,t:'Ollama • '+m})}
   }
-  benchModel.innerHTML=ms.length?ms.map(m=>'<option value="'+escPi(m.v)+'">'+escPi(m.t)+'</option>').join(''):'<option value="">No models discovered</option>';
+  // Do not HTML-escape option values/text while constructing DOM with innerHTML:
+  // escPi is for chat rendering and was turning model paths into markup/empty options
+  // in some browsers. Build real Option nodes instead.
+  benchModel.replaceChildren();
+  if(ms.length){
+   for(const m of ms){const o=document.createElement('option');o.value=m.v;o.textContent=m.t;benchModel.appendChild(o)}
+  }else{
+   const o=document.createElement('option');o.value='';o.textContent='No models discovered';benchModel.appendChild(o);
+  }
   const dis=new Set((n.disabled_gpus||[]).map(Number));
-  benchGpu.innerHTML='<option value="auto">Auto</option>'+((n.gpus||[]).map(g=>'<option value="'+g.index+'" '+(dis.has(Number(g.index))?'disabled':'')+'>GPU '+g.index+' • '+escPi(g.name)+'</option>').join(''))+((n.gpus||[]).length>1?'<option value="all">All enabled GPUs</option>':'');
+  benchGpu.replaceChildren();let go=new Option('Auto','auto');benchGpu.appendChild(go);
+  for(const g of (n.gpus||[])){go=new Option('GPU '+g.index+' • '+String(g.name||''),String(g.index));go.disabled=dis.has(Number(g.index));benchGpu.appendChild(go)}
+  if((n.gpus||[]).length>1)benchGpu.appendChild(new Option('All enabled GPUs','all'));
   benchRunStatus.textContent='Discovered: '+(n.models||[]).length+' GGUF • '+(n.running_models||[]).length+' running • '+(n.ollama_models||[]).length+' Ollama';
  }catch(e){benchModel.innerHTML='<option value="">Discovery error</option>';benchGpu.innerHTML='<option value="auto">Auto</option>';benchRunStatus.textContent='Discovery ERROR: '+e.message}
 }
