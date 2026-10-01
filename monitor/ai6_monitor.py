@@ -416,6 +416,10 @@ class WorkerCommand(BaseModel):
     profile: str | None = None
 
 
+class HostDelayCommand(BaseModel):
+    action: str
+    delay_minutes: int = 2
+
 class HostCommand(BaseModel):
     action: str
     confirm: str
@@ -488,6 +492,27 @@ def host_action(cmd: HostCommand):
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.post("/api/host/action/delay")
+def host_action_delay(cmd: HostDelayCommand):
+    expected = {
+        "poweroff": "POWER OFF AI6",
+    }
+    phrase = expected.get(cmd.action)
+    if phrase is None:
+        raise HTTPException(status_code=400, detail="invalid host action")
+    
+    # Validate delay (only 2 minutes for now)
+    if cmd.delay_minutes != 2:
+        raise HTTPException(status_code=400, detail="only 2-minute delay supported")
+    
+    # We'll use the existing hostctl with a delay
+    try:
+        run_hostctl(f"poweroff --delay {cmd.delay_minutes}")
+        return {"ok": True, "action": cmd.action, "delay": cmd.delay_minutes}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -536,7 +561,7 @@ DASHBOARD = r'''<!doctype html>
 
 <div class="section"><div class="section-head"><div><div class="section-title">GPUs</div><div class="section-sub">Live load, temperature, power, VRAM and fan telemetry</div></div></div><div id="gpus"></div></div>
 <div class="section"><div class="section-title">PSU 12V sample</div><p class="muted">Enter the multimeter reading. The current GPU power and temperatures will be logged to CSV on the host.</p><input id="v12" type="number" step="0.01" placeholder="12.05"><input id="note" placeholder="note, e.g. 400W"><button onclick="saveSample()">Save sample</button><div id="saved" class="muted"></div></div>
-<div class="section"><div class="section-title">Web Terminal</div><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div class="host-controls"><span class="host-label">Host controls</span><button class="host-btn reboot" onclick="hostAction('reboot')">↻ Reboot server</button><button class="host-btn poweroff" onclick="hostAction('poweroff')">⏻ Power off server</button><span class="host-hint">Typed confirmation is required.</span></div><div id="hostmsg" class="muted" style="margin-top:8px"></div><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div>
+<div class="section"><div class="section-title">Web Terminal</div><p class="muted">Direct shell on the AI6 host. It runs as the normal Linux user and is protected by separate HTTP Basic authentication.</p><button onclick="openTerminal()">Open Web Terminal</button> <button onclick="toggleTerminal()">Show / hide below</button><div class="host-controls"><span class="host-label">Host controls</span><button class="host-btn reboot" onclick="hostAction('reboot')">↻ Reboot server</button><button class="host-btn poweroff" onclick="hostAction('poweroff')">⏻ Power off server</button><button class="host-btn poweroff" onclick="hostActionDelay('poweroff')">⏻ Power off in 2 min</button><span class="host-hint">Typed confirmation is required.</span></div><div id="hostmsg" class="muted" style="margin-top:8px"></div><div id="termwrap" style="display:none;margin-top:12px"><iframe id="termframe" title="AI6 Web Terminal" style="width:100%;height:520px;border:1px solid #333;border-radius:10px;background:#000"></iframe></div></div>
 <script>
 const mib=(v)=>v==null?'?':(v/1024).toFixed(2)+' GiB';
 const gib=(v)=>v==null?'?':(v/1073741824).toFixed(2)+' GiB';
@@ -579,6 +604,8 @@ async function saveSample(){const v=parseFloat(v12.value);if(!Number.isFinite(v)
 async function workerAction(action,port){workermsg.textContent=action+' '+port+'...';const r=await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,port})});const x=await r.json();workermsg.textContent=r.ok?'OK: '+action+' '+port:'ERROR: '+(x.detail||JSON.stringify(x));setTimeout(refresh,800)}
 async function setProfile(p){workermsg.textContent='switching profile '+p+'...';const r=await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'profile',profile:p})});const x=await r.json();workermsg.textContent=r.ok?'OK: profile '+p:'ERROR: '+(x.detail||JSON.stringify(x));setTimeout(refresh,1200)}
 async function hostAction(action){const phrase=action==='reboot'?'REBOOT AI6':'POWER OFF AI6';const label=action==='reboot'?'reboot':'power off';const typed=window.prompt('Type '+phrase+' to '+label+' the whole AI6 server:');if(typed===null)return;if(typed!==phrase){hostmsg.textContent='Cancelled: confirmation text did not match.';return}hostmsg.textContent='Sending '+label+' command…';try{const r=await fetch('/api/host/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,confirm:typed})});const x=await r.json();if(!r.ok){hostmsg.textContent='ERROR: '+(x.detail||JSON.stringify(x));return}hostmsg.textContent=action==='reboot'?'Reboot requested. This page will disconnect and return after boot.':'Power off requested. The server will go offline.'}catch(e){hostmsg.textContent=label+' requested; connection closed.'}}
+
+async function hostActionDelay(action){const phrase=action==='reboot'?'REBOOT AI6':'POWER OFF AI6';const label=action==='reboot'?'reboot':'power off';const typed=window.prompt('Type '+phrase+' to '+label+' the whole AI6 server in 2 minutes:');if(typed===null)return;if(typed!==phrase){hostmsg.textContent='Cancelled: confirmation text did not match.';return}hostmsg.textContent='Sending '+label+' command in 2 minutes…';try{const r=await fetch('/api/host/action/delay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,confirm:typed,delay_minutes:2})});const x=await r.json();if(!r.ok){hostmsg.textContent='ERROR: '+(x.detail||JSON.stringify(x));return}hostmsg.textContent=action==='reboot'?'Reboot requested. This page will disconnect and return after boot.':'Power off requested. The server will go offline.'}catch(e){hostmsg.textContent=label+' requested; connection closed.'}}
 function terminalUrl(){return location.protocol+'//'+location.hostname+':8091/'}
 function openTerminal(){window.open(terminalUrl(),'_blank','noopener')}
 function toggleTerminal(){const w=document.getElementById('termwrap'),f=document.getElementById('termframe');if(w.style.display==='none'){if(!f.src)f.src=terminalUrl();w.style.display='block'}else{w.style.display='none'}}
