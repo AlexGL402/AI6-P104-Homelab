@@ -1,0 +1,31 @@
+=== DATE ===
+Thu Oct  1 11:41:45 PM UTC 2026
+=== NVIDIA ===
+No devices found.
+=== PCI ===
+02:00.0 3D controller [0302]: NVIDIA Corporation TU102 [CMP 50HX] [10de:1e09] (rev a1)
+04:00.0 3D controller [0302]: NVIDIA Corporation TU102 [CMP 50HX] [10de:1e09] (rev a1)
+=== CMP UNLOCK ===
+○ cmp50hx-gen2.service - CMP 50HX PCIe Gen2 unlock and auto-retrain (direct BAR0 policy)
+     Loaded: loaded (/etc/systemd/system/cmp50hx-gen2.service; enabled; preset: enabled)
+     Active: inactive (dead) since Thu 2026-10-01 23:33:42 UTC; 8min ago
+       Docs: https://github.com/xrip/cmp50hx-unlock
+    Process: 1075 ExecStart=/usr/local/sbin/cmp50hx-gen2 (code=exited, status=0/SUCCESS)
+   Main PID: 1075 (code=exited, status=0/SUCCESS)
+        CPU: 783ms
+
+Oct 01 23:33:09 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:04:00.0: ADOPTED tls=2 cap=2
+Oct 01 23:33:09 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:04:00.0: card unlocked (TLS=2), firing retrain via 0000:00:03.0 (link now Gen1)
+Oct 01 23:33:12 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:04:00.0: retrain fired, link still at Gen1 < Gen2 (will retry)
+Oct 01 23:33:27 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:02:00.0: card unlocked (TLS=2), firing retrain via 0000:00:01.1 (link now Gen1)
+Oct 01 23:33:27 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:02:00.0: PASS, link at 5.0 GT/s PCIe
+Oct 01 23:33:27 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:04:00.0: card unlocked (TLS=2), firing retrain via 0000:00:03.0 (link now Gen1)
+Oct 01 23:33:27 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: 0000:04:00.0: PASS, link at 5.0 GT/s PCIe
+Oct 01 23:33:42 t5600 cmp50hx-gen2[1075]: cmp50hx-gen2: all CMP 50HX cards at their target generation
+Oct 01 23:33:42 t5600 systemd[1]: cmp50hx-gen2.service: Deactivated successfully.
+Oct 01 23:33:42 t5600 systemd[1]: Finished cmp50hx-gen2.service - CMP 50HX PCIe Gen2 unlock and auto-retrain (direct BAR0 policy).
+=== MODULES ===
+nvidia_uvm           2043904  0
+nvidia              16498688  5 nvidia_uvm
+ecc                    45056  1 nvidia
+=== NVRM ===
