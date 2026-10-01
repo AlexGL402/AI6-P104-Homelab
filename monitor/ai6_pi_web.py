@@ -264,7 +264,8 @@ def install():
           <option value="8b" selected>Qwen3 8B — fast / default</option>
           <option value="14b">Qwen3 14B — quality / slow</option>
         </select>
-        <button onclick="togglePiSettings()">⚙ Workers</button>\n        <button onclick="clearPiChat()">New chat</button>
+        <button onclick="togglePiSettings()">⚙ Workers</button>
+        <button onclick="clearPiChat()">New chat</button>
         <button onclick="openPiTerminal()">Terminal</button>
       </div>
     </div>
