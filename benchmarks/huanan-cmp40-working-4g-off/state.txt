@@ -1,0 +1,69 @@
+Thu Oct  1 04:22:27 PM UTC 2026
+Linux huanan 6.8.0-139-generic #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 03:52:05 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+Thu Oct  1 16:22:27 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 610.43.03              KMD Version: 610.43.03     CUDA UMD Version: 13.3     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA CMP 40HX                Off |   00000000:03:00.0 Off |                  N/A |
+| 33%   54C    P0             31W /  184W |       0MiB /   8192MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+03:00.0 3D controller: NVIDIA Corporation TU106 [CMP 40HX] (rev a1)
+	Subsystem: ASUSTeK Computer Inc. TU106 [CMP 40HX]
+	Control: I/O+ Mem+ BusMaster+ SpecCycle- MemWINV- VGASnoop- ParErr- Stepping- SERR- FastB2B- DisINTx-
+	Status: Cap+ 66MHz- UDF- FastB2B- ParErr- DEVSEL=fast >TAbort- <TAbort- <MAbort- >SERR- <PERR- INTx-
+	Latency: 0
+	Interrupt: pin A routed to IRQ 27
+	Region 0: Memory at f9000000 (32-bit, non-prefetchable) [size=16M]
+	Region 1: Memory at f0000000 (64-bit, prefetchable) [size=64M]
+	Region 3: Memory at f4000000 (64-bit, prefetchable) [size=32M]
+	Region 5: I/O ports at e000 [size=128]
+	Capabilities: <access denied>
+	Kernel driver in use: nvidia
+	Kernel modules: nvidiafb, nouveau, nvidia_drm, nvidia
+
+
+00:02.0 PCI bridge: Intel Corporation Xeon E7 v2/Xeon E5 v2/Core i7 PCI Express Root Port 2a (rev 04) (prog-if 00 [Normal decode])
+	Subsystem: Intel Corporation Xeon E7 v2/Xeon E5 v2/Core i7 PCI Express Root Port 2a
+	Control: I/O+ Mem+ BusMaster+ SpecCycle- MemWINV- VGASnoop- ParErr- Stepping- SERR- FastB2B- DisINTx+
+	Status: Cap+ 66MHz- UDF- FastB2B- ParErr- DEVSEL=fast >TAbort- <TAbort- <MAbort- >SERR- <PERR- INTx-
+	Latency: 0, Cache Line Size: 64 bytes
+	Interrupt: pin A routed to IRQ 28
+	Bus: primary=00, secondary=03, subordinate=03, sec-latency=0
+	I/O behind bridge: e000-efff [size=4K] [16-bit]
+	Memory behind bridge: f9000000-f9ffffff [size=16M] [32-bit]
+	Prefetchable memory behind bridge: f0000000-f5ffffff [size=96M] [32-bit]
+	Secondary status: 66MHz- FastB2B- ParErr- DEVSEL=fast >TAbort- <TAbort- <MAbort- <SERR- <PERR-
+	BridgeCtl: Parity- SERR+ NoISA- VGA- VGA16+ MAbort- >Reset- FastB2B-
+		PriDiscTmr- SecDiscTmr- DiscTmrStat- DiscTmrSERREn-
+	Capabilities: <access denied>
+	Kernel driver in use: pcieport
+
+
+BootCurrent: 000A
+Timeout: 1 seconds
+BootOrder: 0001,000A,0008,0005,0006,0004,0000,0002,0003
+Boot0000* CMP40 Unlock	HD(1,GPT,4f068d58-736c-4a61-994f-5e9132b1d92e,0x800,0x100000)/File(\EFI\CMP40\40HXUNLK.EFI)
+Boot0001* Ubuntu	HD(1,GPT,4f068d58-736c-4a61-994f-5e9132b1d92e,0x800,0x100000)/File(\EFI\ubuntu\shimx64.efi)
+Boot0002* UEFI OS	HD(1,GPT,a27a3bc0-1ca2-4aca-a3bc-43edfba30f69,0x800,0x100000)/File(\EFI\BOOT\BOOTX64.EFI)
+Boot0003* Windows Boot Manager	HD(1,GPT,4f068d58-736c-4a61-994f-5e9132b1d92e,0x800,0x100000)/File(\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI)
+Boot0004* ubuntu	HD(1,GPT,4f068d58-736c-4a61-994f-5e9132b1d92e,0x800,0x100000)/File(\EFI\UBUNTU\GRUBX64.EFI)
+Boot0005* Hard Drive 	BBS(HD,,0x0)0000474f00004e4fa7000000010000007300540058005200550049002000560036003000300020003200340030004700420000000501090002000000007fff040002010c00d041030a00000000010106000001010106000000031710000100000000000000000000007fff040001043600ef47642dc93ba041ac194d51d01b4ce6540058005200550049002000560036003000300020003200340030004700420000007fff04000000424f00004e4f99000000010000006f004100440041005400410020005300500036003000300000000501090002000000007fff040002010c00d041030a0000000001010600021f03120a000100ffff00007fff040001043e00ef47642dc93ba041ac194d51d01b4ce64600370039003200300032003000300037003900310033002000200020002000200020002000200000007fff04000000424f
+Boot0006* Network Card 	BBS(Network,,0x0)0000474f00004e4fa5000000010000006b005200650061006c00740065006b0020005000580045002000420030003700200044003000300000000501090006000000007fff040001041a00ae84b11df581724e85442bab0c2cac5c0700000200007fff040001043c00ef47642dc93ba041ac194d51d01b4ce65200650061006c00740065006b0020005000580045002000420030003700200044003000300000007fff04000000424f
+Boot0007  Hard Drive 	BBS(HD,,0x0)0000474f00004e4f99000000010000006f004100440041005400410020005300500036003000300000000501090002000000007fff040002010c00d041030a0000000001010600021f03120a000100ffff00007fff040001043e00ef47642dc93ba041ac194d51d01b4ce64600370039003200300032003000300037003900310033002000200020002000200020002000200000007fff04000000424f00004e4fa7000000010000007300540058005200550049002000560036003000300020003200340030004700420000000501090002000000007fff040002010c00d041030a00000000010106000001010106000000031710000100000000000000000000007fff040001043600ef47642dc93ba041ac194d51d01b4ce6540058005200550049002000560036003000300020003200340030004700420000007fff04000000424f
+Boot0008* Ubuntu	HD(1,GPT,4f068d58-736c-4a61-994f-5e9132b1d92e,0x800,0x100000)/File(\EFI\UBUNTU\SHIMX64.EFI)
+Boot000A* UEFI OS	HD(1,GPT,4f068d58-736c-4a61-994f-5e9132b1d92e,0x800,0x100000)/File(\EFI\BOOT\BOOTX64.EFI)
