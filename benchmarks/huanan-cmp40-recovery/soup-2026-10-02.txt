@@ -1,0 +1,25 @@
+CMP40HX Huanan recovery validation
+Date: 2026-10-02
+
+Soup NF4 streamed LoRA
+Model: Llama 3.1 8B
+seq=512 batch=1 buffers=2
+LoRA r=16 alpha=32 q_proj,v_proj
+
+Current:
+Throughput: 173.90 tok/s
+Step median: 2945 ms
+Peak VRAM: 2.40 GB
+GPU util: 100%
+Median SM: 1875 MHz
+Max temp: 76 C
+Effective: 7.65 TFLOPS
+
+Saved baseline:
+Throughput: 174.67 tok/s
+Step median: 2931.6 ms
+
+Difference: -0.44%
+
+RESULT: PASS
+CMP40 AI performance restored to baseline.
