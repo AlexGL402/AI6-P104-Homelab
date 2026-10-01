@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Web UI/API for the local Pi coding agent."""
 
+import json
 import os
 import subprocess
 import time
@@ -73,7 +74,7 @@ def pi_chat(cmd: PiChatCommand):
     prompt = _history_prompt(cmd.history, cmd.prompt)
     args = [
         str(PI),
-        "--print",
+        "--mode", "json",
         "--approve",
         "--provider", provider,
         "--model", model_id,
@@ -97,12 +98,40 @@ def pi_chat(cmd: PiChatCommand):
     if p.returncode != 0:
         err = (p.stderr or p.stdout or f"Pi exited {p.returncode}").strip()
         raise base.HTTPException(status_code=409, detail=err[-6000:])
+    response_parts = []
+    usage = {}
+    tool_calls = 0
+    for line in (p.stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(event.get("usage"), dict):
+            usage.update(event["usage"])
+        if event.get("type") == "message_end":
+            msg = event.get("message") or {}
+            if isinstance(msg.get("usage"), dict):
+                usage.update(msg["usage"])
+            if msg.get("role") == "assistant":
+                for part in msg.get("content") or []:
+                    if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):
+                        response_parts.append(part["text"])
+        if event.get("type") == "tool_execution_start":
+            tool_calls += 1
+
+    response = response_parts[-1] if response_parts else "(no assistant text)"
+    inp = usage.get("input") or usage.get("inputTokens") or usage.get("promptTokens") or 0
+    out = usage.get("output") or usage.get("outputTokens") or usage.get("completionTokens") or 0
+    total = usage.get("totalTokens") or ((inp or 0) + (out or 0))
     return {
         "ok": True,
         "model": model_id,
         "label": label,
         "elapsed_s": elapsed,
-        "response": (p.stdout or "").strip(),
+        "response": response.strip(),
+        "usage": {"input": inp, "output": out, "total": total},
+        "avg_output_tok_s": round(out / elapsed, 2) if out and elapsed else None,
+        "tool_calls": tool_calls,
         "stderr": (p.stderr or "").strip()[-2000:],
     }
 
@@ -140,8 +169,8 @@ def install():
       </div>
       <div class="pi-toolbar">
         <select id="piModel">
-          <option value="14b">Qwen3 14B — quality</option>
-          <option value="8b">Qwen3 8B — fast</option>
+          <option value="8b" selected>Qwen3 8B — fast / default</option>
+          <option value="14b">Qwen3 14B — quality / slow</option>
         </select>
         <button onclick="clearPiChat()">New chat</button>
         <button onclick="openPiTerminal()">Terminal</button>
@@ -188,7 +217,7 @@ async function sendPi(){
  piHistory.push({role:'user',content:prompt});renderPi();input.value='';btn.disabled=true;piStatus.textContent='● Pi working…';piStatus.className='status loading';
  try{
   const r=await fetch('/api/pi/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,model,history:prior})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));
-  piHistory.push({role:'assistant',content:d.response||'(no text)',meta:d.label+' • '+d.elapsed_s+' s'});renderPi();piStatus.textContent='● Pi ready • '+d.label;piStatus.className='status ready';
+  const u=d.usage||{};const speed=d.avg_output_tok_s!=null?d.avg_output_tok_s+' agent tok/s':'tok/s —';const toks=(u.input||0)+' in / '+(u.output||0)+' out';const tools=(d.tool_calls||0)+' tools';piHistory.push({role:'assistant',content:d.response||'(no text)',meta:d.label+' • '+d.elapsed_s+' s • '+toks+' • '+speed+' • '+tools});renderPi();piStatus.textContent='● Pi ready • '+d.label+' • '+toks+' • '+speed;piStatus.className='status ready';
  }catch(e){piHistory.push({role:'assistant',content:'ERROR: '+e.message,meta:'request failed'});renderPi();piStatus.textContent='● Pi error';piStatus.className='status error'}
  finally{btn.disabled=false;input.focus()}
 }
