@@ -6,6 +6,7 @@ import os
 import subprocess
 import time
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ REPO = Path.home() / "AI6-P104-Homelab"
 PI = Path("/usr/bin/pi")
 PROVIDERS_FILE = Path.home() / ".local/state/ai6-monitor/pi-providers.json"
 BENCH_FILE = Path.home() / ".local/state/ai6-monitor/pi-benchmarks.jsonl"
+NODES_FILE = Path.home() / ".local/state/ai6-monitor/pi-nodes.json"
 MODELS = {
     "8b": ("ai6-ollama", "qwen3:8b", "Qwen3 8B"),
     "14b": ("ai6-ollama", "qwen3:14b", "Qwen3 14B"),
@@ -29,10 +31,57 @@ class ProviderCommand(BaseModel):
     api_key: str = Field(default="ollama", max_length=256)
 
 
+class NodeCommand(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    monitor_url: str = Field(min_length=8, max_length=256)
+
+
+class NodeStartCommand(BaseModel):
+    name: str
+    model: str
+    gpus: list[int]
+    split: str = "layer"
+    ctx: int = 8192
+    ngl: int = 999
+    alias: str = "pi-remote"
+
+
+class NodeStopCommand(BaseModel):
+    name: str
+    port: int
+
+
 class PiChatCommand(BaseModel):
     prompt: str = Field(min_length=1, max_length=12000)
     model: str = Field(default="8b", max_length=256)
     history: list[dict] = Field(default_factory=list)
+
+
+def _load_nodes():
+    try:
+        return json.loads(NODES_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _save_nodes(items):
+    NODES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    NODES_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2) + "\n")
+
+
+def _json_request(url, method="GET", payload=None, timeout=8):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _node(name):
+    for item in _load_nodes():
+        if item.get("name") == name:
+            return item
+    raise base.HTTPException(status_code=404, detail="managed node not found")
 
 
 def _provider_key(name):
@@ -133,6 +182,100 @@ def pi_status():
         "models": models,
         "terminal_port": 8093,
     }
+
+
+@base.app.get("/api/pi/nodes")
+def pi_nodes():
+    out = []
+    for item in _load_nodes():
+        row = dict(item)
+        try:
+            root = item["monitor_url"].rstrip("/")
+            stats = _json_request(root + "/api/stats", timeout=3)
+            models = _json_request(root + "/api/models", timeout=3).get("models", [])
+            row.update({"online": True, "host": stats.get("host", {}),
+                        "gpus": stats.get("gpu", {}).get("devices", []),
+                        "workers": stats.get("llama", {}).get("workers", {}),
+                        "models": models})
+        except Exception as e:
+            row.update({"online": False, "error": str(e), "gpus": [], "workers": {}, "models": []})
+        out.append(row)
+    return {"nodes": out}
+
+
+@base.app.post("/api/pi/nodes")
+def pi_node_add(cmd: NodeCommand):
+    root = cmd.monitor_url.rstrip("/")
+    try:
+        stats = _json_request(root + "/api/stats", timeout=4)
+        models = _json_request(root + "/api/models", timeout=4).get("models", [])
+    except Exception as e:
+        raise base.HTTPException(status_code=409, detail=f"node test failed: {e}")
+    items = [x for x in _load_nodes() if x.get("name") != cmd.name]
+    items.append({"name": cmd.name, "monitor_url": root})
+    _save_nodes(items)
+    return {"ok": True, "host": stats.get("host", {}), "models": len(models),
+            "gpus": len(stats.get("gpu", {}).get("devices", []))}
+
+
+@base.app.delete("/api/pi/nodes/{name}")
+def pi_node_delete(name: str):
+    _save_nodes([x for x in _load_nodes() if x.get("name") != name])
+    return {"ok": True}
+
+
+@base.app.post("/api/pi/nodes/start")
+def pi_node_start(cmd: NodeStartCommand):
+    item = _node(cmd.name)
+    root = item["monitor_url"].rstrip("/")
+    try:
+        started = _json_request(root + "/api/workers/custom/start", "POST", {
+            "model": cmd.model, "gpus": cmd.gpus, "split": cmd.split,
+            "ctx": cmd.ctx, "ngl": cmd.ngl, "port": None, "alias": cmd.alias,
+        }, timeout=12)
+    except Exception as e:
+        raise base.HTTPException(status_code=409, detail=f"remote start failed: {e}")
+    port = int(started["port"])
+    parsed = urllib.parse.urlsplit(root)
+    worker_url = f"{parsed.scheme}://{parsed.hostname}:{port}/v1"
+    ready = False
+    last_error = ""
+    for _ in range(90):
+        try:
+            models = _discover_models(worker_url, "ollama")
+            if models:
+                ready = True
+                break
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(1)
+    if not ready:
+        return {"ok": True, "started": True, "ready": False, "port": port,
+                "worker_url": worker_url, "detail": last_error or "model still loading"}
+    provider_name = f"{cmd.name}-{cmd.alias}-{port}"
+    items = [x for x in _load_providers() if x.get("name") != provider_name]
+    items.append({"name": provider_name, "base_url": worker_url,
+                  "api_key": "ollama", "models": models, "managed_node": cmd.name,
+                  "managed_port": port})
+    _save_providers(items)
+    _sync_pi_models()
+    return {"ok": True, "started": True, "ready": True, "port": port,
+            "worker_url": worker_url, "provider": provider_name, "models": models}
+
+
+@base.app.post("/api/pi/nodes/stop")
+def pi_node_stop(cmd: NodeStopCommand):
+    item = _node(cmd.name)
+    root = item["monitor_url"].rstrip("/")
+    try:
+        result = _json_request(root + "/api/workers/custom/stop", "POST",
+                               {"port": cmd.port}, timeout=10)
+    except Exception as e:
+        raise base.HTTPException(status_code=409, detail=f"remote stop failed: {e}")
+    _save_providers([x for x in _load_providers()
+                     if not (x.get("managed_node") == cmd.name and x.get("managed_port") == cmd.port)])
+    _sync_pi_models()
+    return {"ok": True, "result": result}
 
 
 @base.app.get("/api/pi/providers")
@@ -311,6 +454,14 @@ def install():
     </div>
     <div id="piStatus" class="muted">checking Pi…</div>
     <div id="piSettings" class="pi-settings" style="display:none">
+      <b>Managed AI6 nodes</b>
+      <div class="pi-settings-row">
+        <input id="piNodeName" placeholder="Node: T5600">
+        <input id="piNodeUrl" placeholder="http://192.168.1.2:8090">
+        <button onclick="addPiNode()">Test + Save node</button>
+      </div>
+      <div id="piNodes" class="pi-nodes"></div>
+      <hr style="border:0;border-top:1px solid #333;margin:12px 0">
       <b>Model workers / OpenAI-compatible endpoints</b>
       <div class="pi-settings-row">
         <input id="piWorkerName" placeholder="Name: T5600 / AI6">
@@ -338,7 +489,7 @@ def install():
     dashboard = dashboard.replace(old, new, 1)
     dashboard = dashboard.replace(
         "</style></head><body>",
-        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
+        r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}.pi-node{padding:8px 0;border-bottom:1px solid #292929}.pi-node-start{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:6px}.pi-node-start select{max-width:420px;padding:5px}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
 </style></head><body>''',
         1,
     )
@@ -360,6 +511,34 @@ async function loadPiBench(){
   piBench.innerHTML='<table><thead><tr><th>Model / worker</th><th>Total</th><th>Tool</th><th>LLM+overhead</th><th>In</th><th>Out</th><th>Agent tok/s</th><th>Tools</th></tr></thead><tbody>'+rows.slice(0,12).map(x=>'<tr><td>'+escPi(x.label)+'</td><td>'+x.elapsed_s+'s</td><td>'+x.tool_time_s+'s</td><td>'+x.llm_plus_overhead_s+'s</td><td>'+x.input+'</td><td>'+x.output+'</td><td>'+(x.agent_tok_s??'—')+'</td><td>'+x.tool_calls+'</td></tr>').join('')+'</tbody></table>';
  }catch(e){piBench.textContent='Benchmark history error: '+e.message}
 }
+async function loadPiNodes(){
+ try{
+  const r=await fetch('/api/pi/nodes');const d=await r.json();const ns=d.nodes||[];
+  piNodes.innerHTML=ns.length?ns.map(n=>{
+   const gs=(n.gpus||[]).map(g=>'GPU'+g.index+' '+g.name+' '+Math.round(g.memory_total_mib||0)+'MiB').join(' • ');
+   const opts=(n.models||[]).map(m=>'<option value="'+escPi(m.path)+'">'+escPi(m.label)+'</option>').join('');
+   const gpuChecks=(n.gpus||[]).map(g=>'<label><input type="checkbox" class="nodeGpu" data-node="'+encodeURIComponent(n.name)+'" value="'+g.index+'">GPU '+g.index+'</label>').join(' ');
+   const workers=Object.entries(n.workers||{}).map(([p,w])=>'<span>'+p+' '+escPi(w.status_text||w.state||'')+(w.managed?'':' <button onclick="stopPiNodeWorker(\''+encodeURIComponent(n.name)+'\','+p+')">Stop</button>')+'</span>').join(' • ');
+   return '<div class="pi-node"><b>'+escPi(n.name)+'</b> • '+(n.online?'🟢':'🔴')+' '+escPi(n.monitor_url)+'<div class="section-sub">'+escPi(gs)+(n.error?' • '+escPi(n.error):'')+'</div>'+(n.online?'<div class="pi-node-start"><select id="nodeModel_'+encodeURIComponent(n.name)+'">'+opts+'</select><span>'+gpuChecks+'</span><select id="nodeCtx_'+encodeURIComponent(n.name)+'"><option>8192</option><option>16384</option><option>32768</option></select><button onclick="startPiNodeWorker(\''+encodeURIComponent(n.name)+'\')">Start + attach</button><button onclick="deletePiNode(\''+encodeURIComponent(n.name)+'\')">Delete node</button></div><div class="section-sub">'+workers+'</div>':'')+'</div>';
+  }).join(''):'No managed nodes configured.';
+ }catch(e){piNodes.textContent='Nodes error: '+e.message}
+}
+async function addPiNode(){
+ const payload={name:piNodeName.value.trim(),monitor_url:piNodeUrl.value.trim()};if(!payload.name||!payload.monitor_url)return;
+ piNodes.textContent='Testing node…';
+ try{const r=await fetch('/api/pi/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));piNodeName.value='';piNodeUrl.value='';await loadPiNodes()}catch(e){piNodes.textContent='ERROR: '+e.message}
+}
+async function deletePiNode(name){await fetch('/api/pi/nodes/'+name,{method:'DELETE'});loadPiNodes()}
+async function startPiNodeWorker(enc){
+ const name=decodeURIComponent(enc), model=document.getElementById('nodeModel_'+enc).value,ctx=Number(document.getElementById('nodeCtx_'+enc).value);
+ const gpus=[...document.querySelectorAll('.nodeGpu[data-node="'+enc+'"]:checked')].map(x=>Number(x.value));if(!gpus.length){alert('Select GPU');return}
+ piStatus.textContent='● Starting '+name+' worker…';piStatus.className='status loading';
+ try{const r=await fetch('/api/pi/nodes/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,model,gpus,split:'layer',ctx,ngl:999,alias:'pi'})});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadPiNodes();await loadPiWorkers();piStatus.textContent=d.ready?'● Remote worker ready • '+d.provider:'● Worker started on '+d.port+' • still loading';piStatus.className=d.ready?'status ready':'status loading'}catch(e){piStatus.textContent='● Remote start error: '+e.message;piStatus.className='status error'}
+}
+async function stopPiNodeWorker(enc,port){
+ const name=decodeURIComponent(enc);const r=await fetch('/api/pi/nodes/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,port})});const d=await r.json();if(!r.ok){alert(d.detail||JSON.stringify(d));return}await loadPiNodes();await loadPiWorkers()
+}
+
 async function loadPiWorkers(){
  try{
   const r=await fetch('/api/pi/providers');const d=await r.json();const ps=d.providers||[];
@@ -391,7 +570,7 @@ async function sendPi(){
 }
 function clearPiChat(){piHistory=[];renderPi();document.getElementById('piPrompt').focus()}
 function openPiTerminal(){window.open(location.protocol+'//'+location.hostname+':8093/','_blank','noopener')}
-window.addEventListener('load',()=>{const p=document.getElementById('piPrompt');if(p)p.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();sendPi()}});refreshPiStatus();loadPiWorkers();loadPiBench()});
+window.addEventListener('load',()=>{const p=document.getElementById('piPrompt');if(p)p.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();sendPi()}});refreshPiStatus();loadPiWorkers();loadPiNodes();loadPiBench()});
 </script>
 '''
     dashboard = dashboard.replace("</body>", js + "\n</body>", 1)
