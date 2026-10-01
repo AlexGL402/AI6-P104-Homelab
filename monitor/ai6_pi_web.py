@@ -654,21 +654,6 @@ def install():
       </div>
       <div id="piWorkers" class="section-sub"></div>
     </div>
-    <div class="pi-bench-runner">
-      <b>Benchmark Runner</b>
-      <div class="pi-bench-controls">
-        <label>Node<select id="benchNode" onchange="benchNodeChanged()"></select></label>
-        <label>Backend<select id="benchBackend" onchange="benchNodeChanged()"><option value="auto">Auto</option><option value="llama.cpp">llama.cpp</option><option value="ollama">Ollama</option><option value="vllm">vLLM</option></select></label>
-        <label>Model<select id="benchModel"></select></label>
-        <label>GPU<select id="benchGpu"></select></label>
-        <label>Context<select id="benchCtx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select></label>
-        <label>Tokens<select id="benchTokens"><option>128</option><option selected>256</option><option>512</option></select></label>
-        <button id="benchRunBtn" onclick="runModelBench()">▶ Run benchmark</button>
-      </div>
-      <div id="benchRunStatus" class="section-sub"></div>
-    </div>
-    <div class="pi-bench-head"><b>Recent runs</b><button onclick="loadPiBench()">Refresh</button></div>
-    <div id="piBench" class="pi-bench"></div>
     <div id="piChat" class="pi-chat">
       <div class="pi-empty">Pi Coder is ready. Ask it to inspect, edit or test this repository.</div>
     </div>
@@ -683,6 +668,35 @@ def install():
     if old not in dashboard:
         raise RuntimeError("Pi tab replacement did not match")
     dashboard = dashboard.replace(old, new, 1)
+
+    bench_runner = r'''<div class="pi-bench-runner">
+      <div class="section-title">Benchmark Runner</div>
+      <div class="section-sub">Run model benchmark on a managed AI6 node</div>
+      <div class="pi-bench-controls">
+        <label>Node<select id="benchNode" onchange="benchNodeChanged()"></select></label>
+        <label>Backend<select id="benchBackend" onchange="benchNodeChanged()"><option value="auto">Auto</option><option value="llama.cpp">llama.cpp</option><option value="ollama">Ollama</option><option value="vllm">vLLM</option></select></label>
+        <label>Model<select id="benchModel"></select></label>
+        <label>GPU<select id="benchGpu"></select></label>
+        <label>Context<select id="benchCtx"><option>4096</option><option selected>8192</option><option>16384</option><option>32768</option></select></label>
+        <label>Tokens<select id="benchTokens"><option>128</option><option selected>256</option><option>512</option></select></label>
+        <button id="benchRunBtn" onclick="runModelBench()">▶ Run benchmark</button>
+      </div>
+      <div id="benchRunStatus" class="section-sub"></div>
+      <div class="pi-bench-head"><b>Latest model runs</b><button onclick="loadPiBench()">Refresh</button></div>
+      <div id="piBench" class="pi-bench"></div>
+    </div>'''
+    bench_markers = (
+        '<div id="benchTab" style="display:none">',
+        '<div id="benchsTab" style="display:none">',
+        '<div id="benchTab">',
+        '<div id="benchsTab">',
+    )
+    for bench_marker in bench_markers:
+        if bench_marker in dashboard:
+            dashboard = dashboard.replace(bench_marker, bench_marker + bench_runner, 1)
+            break
+    else:
+        raise RuntimeError("Benchs tab marker not found")
     dashboard = dashboard.replace(
         "</style></head><body>",
         r'''.pi-toolbar{display:flex;gap:7px;flex-wrap:wrap}.pi-bench-runner{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-bench-controls{display:flex;gap:7px;align-items:end;flex-wrap:wrap;margin-top:7px}.pi-bench-controls label{font-size:10px;color:#aaa}.pi-bench-controls select{display:block;margin-top:3px;max-width:330px;padding:6px}.pi-bench-controls button{padding:7px 10px}.pi-bench-head{display:flex;justify-content:space-between;align-items:center;margin-top:10px}.pi-bench{overflow:auto;margin-top:6px}.pi-bench table{width:100%;border-collapse:collapse;font-size:11px}.pi-bench th,.pi-bench td{padding:5px 7px;border-bottom:1px solid #2d2d2d;text-align:left;white-space:nowrap}.pi-settings{margin-top:10px;padding:10px;border:1px solid #333;border-radius:10px;background:#141414}.pi-settings-row{display:grid;grid-template-columns:160px 1fr 180px 190px;gap:7px;margin-top:8px}.pi-settings-row input{padding:7px}.pi-node{padding:8px 0;border-bottom:1px solid #292929}.pi-node-start{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:6px}.pi-node-start select{max-width:420px;padding:5px}.pi-gpu-policies{display:flex;gap:10px;flex-wrap:wrap;margin:5px 0;font-size:11px}.pi-gpu-policy{color:#bbb}@media(max-width:900px){.pi-settings-row{grid-template-columns:1fr}}.pi-toolbar select{min-width:190px}.pi-chat{height:590px;overflow:auto;background:#101010;border:1px solid #333;border-radius:12px;padding:14px;margin:12px 0}.pi-empty{color:#777;text-align:center;padding:70px 10px}.pi-msg{max-width:88%;margin:9px 0;padding:10px 12px;border-radius:11px;white-space:pre-wrap;line-height:1.45}.pi-user{margin-left:auto;background:#263044;border:1px solid #3b4b68}.pi-assistant{margin-right:auto;background:#181818;border:1px solid #333}.pi-meta{font-size:10px;color:#888;margin-top:7px}.pi-compose{display:grid;grid-template-columns:1fr 90px;gap:8px}.pi-compose textarea{resize:vertical;min-height:92px;padding:11px;background:#151515}.pi-compose button{font-weight:750}.pi-busy{color:#ffd166}@media(max-width:700px){.pi-chat{height:500px}.pi-msg{max-width:96%}.pi-compose{grid-template-columns:1fr}}
