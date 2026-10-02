@@ -1,0 +1,13 @@
+[Unit]
+Description=Load working Forge CMP NVIDIA modules
+After=local-fs.target
+Before=ai6-monitor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'lsmod | grep -q "^nvidia " || /sbin/insmod /lib/modules/$(uname -r)/updates/forge-cmp/nvidia.ko'
+ExecStart=/bin/bash -c 'lsmod | grep -q "^nvidia_uvm " || /sbin/insmod /lib/modules/$(uname -r)/updates/forge-cmp/nvidia-uvm.ko'
+
+[Install]
+WantedBy=multi-user.target
