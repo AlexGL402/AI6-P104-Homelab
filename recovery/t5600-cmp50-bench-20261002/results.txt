@@ -1,0 +1,2 @@
+Mistral Nemo Q4_K_M tensor split: 79.98 tok/s
+Mistral Nemo Q4_K_M layer split: 59.28 tok/s
