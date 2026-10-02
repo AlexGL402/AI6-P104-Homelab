@@ -1,0 +1,17 @@
+flashrom unknown on Linux 6.8.0-139-generic (x86_64)
+flashrom is free software, get the source code at https://flashrom.org
+
+Using clock_gettime for delay loops (clk_id: 1, resolution: 1ns).
+Found chipset "Intel C206".
+This chipset is marked as untested. If you are using an up-to-date version
+of flashrom *and* were (not) able to successfully update your firmware with it,
+then please email a report to flashrom@flashrom.org including a verbose (-V) log.
+Thank you!
+Enabling flash write... FREG0: Flash Descriptor region (0x00000000-0x00000fff) is read-write.
+FREG1: BIOS region (0x00400000-0x007fffff) is read-write.
+FREG2: Management Engine region (0x00001000-0x003fffff) is read-write.
+OK.
+Found Winbond flash chip "W25Q64BV/W25Q64CV/W25Q64FV" (8192 kB, SPI) mapped at physical address 0x00000000ff800000.
+Found Winbond flash chip "W25Q64JV-.Q" (8192 kB, SPI) mapped at physical address 0x00000000ff800000.
+Multiple flash chip definitions match the detected chip(s): "W25Q64BV/W25Q64CV/W25Q64FV", "W25Q64JV-.Q"
+Please specify which chip definition to use with the -c <chipname> option.

@@ -1,0 +1,11 @@
+● forge-cmp-driver.service - Load working Forge CMP NVIDIA modules
+     Loaded: loaded (/etc/systemd/system/forge-cmp-driver.service; enabled; preset: enabled)
+     Active: active (exited) since Fri 2026-10-02 10:46:51 UTC; 7min ago
+    Process: 912 ExecStartPre=/sbin/modprobe ecc (code=exited, status=0/SUCCESS)
+    Process: 931 ExecStart=/bin/bash -c lsmod | grep -q "^nvidia " || /sbin/insmod /lib/modules/$(uname -r)/updates/forge-cmp/nvidia.ko (code=exited, status=0/SUCCESS)
+    Process: 1378 ExecStart=/bin/bash -c lsmod | grep -q "^nvidia_uvm " || /sbin/insmod /lib/modules/$(uname -r)/updates/forge-cmp/nvidia-uvm.ko (code=exited, status=0/SUCCESS)
+   Main PID: 1378 (code=exited, status=0/SUCCESS)
+        CPU: 345ms
+
+Oct 02 10:46:49 huanan systemd[1]: Starting forge-cmp-driver.service - Load working Forge CMP NVIDIA modules...
+Oct 02 10:46:51 huanan systemd[1]: Finished forge-cmp-driver.service - Load working Forge CMP NVIDIA modules.

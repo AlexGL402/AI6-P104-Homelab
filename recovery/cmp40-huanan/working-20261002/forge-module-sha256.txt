@@ -1,0 +1,2 @@
+d7c16490c3e0d6e8f4db3ae2f652e41ad23c2d24f329100c856976475722fb76  /lib/modules/6.8.0-139-generic/updates/forge-cmp/nvidia.ko
+0b3dba650b370a7d1fc5c00254bd1a6007e2959edfcbf5f7a297a8eb7b9f97b9  /lib/modules/6.8.0-139-generic/updates/forge-cmp/nvidia-uvm.ko

@@ -1,0 +1,18 @@
+The time when unit became active or started is printed after the "@" character.
+The time the unit took to start is printed after the "+" character.
+
+forge-cmp-driver.service +1.770s
+└─basic.target @1.463s
+  └─sockets.target @1.462s
+    └─snapd.socket @1.453s +8ms
+      └─sysinit.target @1.419s
+        └─systemd-resolved.service @1.122s +293ms
+          └─systemd-tmpfiles-setup.service @1.060s +38ms
+            └─local-fs.target @1.048s
+              └─var-lib-docker-rootfs-overlayfs-4aef9bcc8c6b034a01472e1955933523a5c2a455d642c3334d1708dca608f840.mount @3.545s
+                └─local-fs-pre.target @514ms
+                  └─multipathd.service @439ms +64ms
+                    └─systemd-remount-fs.service @397ms +38ms
+                      └─systemd-journald.socket @351ms
+                        └─system.slice @277ms
+                          └─-.slice @277ms
