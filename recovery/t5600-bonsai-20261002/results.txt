@@ -1,0 +1,9 @@
+Ternary-Bonsai-2-27B PTQ1_0
+2x CMP50HX
+llama.cpp-prism
+split: layer
+prompt: 15.07 tok/s
+generation: 42.59 tok/s
+VRAM:
+GPU0 3457 MiB
+GPU1 3573 MiB
